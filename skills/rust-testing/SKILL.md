@@ -26,14 +26,16 @@ Write effective tests in Rust using cargo test, property-based testing, and mock
 |------|----------|
 | Unit test | `#[test]` in same file or `tests` module |
 | Integration test | `tests/` directory |
-| Async test | `#[tokio::test]` or `#[async_std::test]` |
+| Async test | `#[tokio::test]` |
 | Property test | `proptest!` macro |
+| Mutation test | `cargo mutants` |
 | Mock trait | `mockall` crate |
 | Test fixtures | `rstest` crate |
 | Snapshot test | `insta` crate |
 | Expect panic | `#[should_panic]` |
 | Skip slow test | `#[ignore]` |
 | Float comparison | `approx` crate or epsilon check |
+| UB detection | `cargo careful test` |
 
 ## Test Organization
 
@@ -66,7 +68,6 @@ mod tests {
 ### Test Result Types
 
 ```rust
-// Return Result for cleaner assertions
 #[test]
 fn test_with_result() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load("test.toml")?;
@@ -81,11 +82,11 @@ fn test_with_result() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 #[should_panic(expected = "division by zero")]
 fn divide_by_zero_panics() {
-    divide(10, 0);  // Should panic
+    divide(10, 0);
 }
 
 #[test]
-#[ignore]  // Skip by default, run with: cargo test -- --ignored
+#[ignore]  // Run with: cargo test -- --ignored
 fn slow_integration_test() {
     // Expensive test
 }
@@ -95,26 +96,15 @@ fn slow_integration_test() {
 
 ```rust
 // BAD: Direct equality fails due to precision
-#[test]
-fn test_float_bad() {
-    assert_eq!(0.1 + 0.2, 0.3);  // FAILS!
-}
+assert_eq!(0.1 + 0.2, 0.3);  // FAILS!
 
-// GOOD: Use epsilon comparison
-#[test]
-fn test_float_epsilon() {
-    let result = 0.1 + 0.2;
-    let expected = 0.3;
-    assert!((result - expected).abs() < f64::EPSILON * 10.0);
-}
+// GOOD: Epsilon comparison
+let result = 0.1 + 0.2;
+assert!((result - 0.3).abs() < f64::EPSILON * 10.0);
 
-// BETTER: Use approx crate
+// BETTER: approx crate
 use approx::assert_relative_eq;
-
-#[test]
-fn test_float_approx() {
-    assert_relative_eq!(0.1 + 0.2, 0.3, epsilon = 1e-10);
-}
+assert_relative_eq!(0.1 + 0.2, 0.3, epsilon = 1e-10);
 ```
 
 ### Async Tests
@@ -127,11 +117,33 @@ async fn test_async_fetch() {
     assert!(result.is_ok());
 }
 
-// With timeout
-#[tokio::test(flavor = "multi_thread")]
-#[timeout(Duration::from_secs(5))]
-async fn test_with_timeout() {
+// Multi-threaded runtime for tests that need it
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_access() {
     // ...
+}
+
+// Timeout via tokio (not an attribute — wrap in the test body)
+#[tokio::test]
+async fn test_with_timeout() {
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        slow_operation(),
+    ).await;
+    assert!(result.is_ok(), "operation timed out");
+}
+```
+
+### Capturing tracing Output in Tests
+
+```rust
+// Use test_log crate to see tracing output during test failures
+use test_log::test;
+
+#[test(tokio::test)]
+async fn test_with_logging() {
+    tracing::info!("this shows on test failure");
+    assert!(some_operation().await.is_ok());
 }
 ```
 
@@ -156,6 +168,19 @@ proptest! {
     }
 }
 ```
+
+### Mutation Testing
+
+Verify tests actually catch bugs — not just that they pass:
+
+```bash
+cargo install cargo-mutants
+cargo mutants                    # Run all mutations
+cargo mutants -p my_crate       # Specific crate
+cargo mutants -- --test-threads=4  # Parallel
+```
+
+Mutation testing modifies your code (removing conditions, changing operators) and checks that at least one test fails. Surviving mutants = gaps in test coverage.
 
 ### Mocking with mockall
 
@@ -206,16 +231,27 @@ fn test_length(#[case] input: &str, #[case] expected: usize) {
 }
 ```
 
+## Verifying Test Quality
+
+```bash
+cargo careful test                  # Run with extra UB checks
+cargo mutants                       # Mutation testing
+cargo tarpaulin --out html          # Coverage report
+```
+
+Break the code intentionally, confirm a test fails, then fix. If no test fails, you have a gap.
+
 ## Common Commands
 
 ```bash
-cargo test                    # Run all tests
-cargo test test_name          # Run specific test
-cargo test --lib              # Only lib tests
-cargo test --doc              # Only doc tests
-cargo test -- --nocapture     # Show println! output
-cargo test -- --test-threads=1  # Sequential execution
-RUST_BACKTRACE=1 cargo test   # With backtraces
+cargo test                          # Run all tests
+cargo test test_name                # Run specific test
+cargo test --lib                    # Only lib tests
+cargo test --doc                    # Only doc tests
+cargo test -- --nocapture           # Show println!/tracing output
+cargo test -- --test-threads=1      # Sequential execution
+RUST_BACKTRACE=1 cargo test         # With backtraces
+cargo nextest run                   # Faster parallel runner
 ```
 
 ## Common Mistakes
@@ -224,20 +260,22 @@ RUST_BACKTRACE=1 cargo test   # With backtraces
 |---------|-------|-----|
 | Testing private functions | Brittle tests | Test public API |
 | Hardcoded paths | Fails on other machines | Use `tempfile` crate |
-| Sleep in async tests | Flaky, slow | Use channels/conditions |
+| Sleep in async tests | Flaky, slow | Use channels/notify/timeout |
 | No error case tests | Miss failure modes | Test both Ok and Err |
 | Giant test functions | Hard to debug | One assertion focus per test |
 | Shared mutable state | Test pollution | Use fixtures, isolate state |
+| Tests pass but don't catch bugs | False confidence | Mutation testing |
 
 ## Essential Crates
 
 - `proptest` - Property-based testing
+- `cargo-mutants` - Mutation testing
 - `mockall` - Mock generation
 - `rstest` - Fixtures and parametrized tests
 - `insta` - Snapshot testing
 - `tempfile` - Temporary files/directories
-- `fake` - Fake data generation
 - `wiremock` - HTTP mocking
 - `approx` - Floating-point comparisons
-- `cargo-tarpaulin` - Code coverage
+- `test-log` - Capture tracing in tests
 - `cargo-nextest` - Faster test runner
+- `cargo-tarpaulin` - Code coverage

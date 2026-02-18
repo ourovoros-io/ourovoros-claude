@@ -7,7 +7,7 @@ description: Use when optimizing Rust code performance, profiling with flamegrap
 
 ## Overview
 
-Optimize Rust code systematically: measure first, identify bottlenecks, optimize with data. Avoid premature optimization - most code doesn't need tuning.
+Optimize Rust code systematically: measure first, identify bottlenecks, optimize with data. Avoid premature optimization — most code doesn't need tuning.
 
 ## When to Use
 
@@ -28,6 +28,7 @@ Optimize Rust code systematically: measure first, identify bottlenecks, optimize
 | CPU profiling | `perf`, `flamegraph` |
 | Memory profiling | `heaptrack`, `valgrind` |
 | Allocation tracking | `dhat`, `#[global_allocator]` |
+| UB/safety checks | `cargo careful test` |
 | Compile-time | `cargo build --timings` |
 | Binary size | `cargo bloat`, `twiggy` |
 
@@ -53,40 +54,21 @@ Optimize Rust code systematically: measure first, identify bottlenecks, optimize
 // benches/my_benchmark.rs
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-fn fibonacci(n: u64) -> u64 {
-    match n {
-        0 => 0,
-        1 => 1,
-        _ => fibonacci(n - 1) + fibonacci(n - 2),
-    }
-}
+fn bench_placement(c: &mut Criterion) {
+    let mut group = c.benchmark_group("placement");
 
-fn bench_fibonacci(c: &mut Criterion) {
-    c.bench_function("fib 20", |b| {
-        b.iter(|| fibonacci(black_box(20)))
-    });
-}
-
-// Compare implementations
-fn bench_compare(c: &mut Criterion) {
-    let mut group = c.benchmark_group("string-concat");
-
-    group.bench_function("format", |b| {
-        b.iter(|| format!("{}{}", black_box("hello"), black_box("world")))
+    group.bench_function("crush_v2", |b| {
+        b.iter(|| calculate_placement(black_box(&cluster_map), black_box(file_hash)))
     });
 
-    group.bench_function("push_str", |b| {
-        b.iter(|| {
-            let mut s = String::from(black_box("hello"));
-            s.push_str(black_box("world"));
-            s
-        })
+    group.bench_function("crush_v1", |b| {
+        b.iter(|| calculate_placement_v1(black_box(&cluster_map), black_box(file_hash)))
     });
 
     group.finish();
 }
 
-criterion_group!(benches, bench_fibonacci, bench_compare);
+criterion_group!(benches, bench_placement);
 criterion_main!(benches);
 ```
 
@@ -102,67 +84,111 @@ harness = false
 
 ## Common Optimizations
 
+### Zero-Copy with Bytes
+
+```rust
+use bytes::{Bytes, BytesMut, BufMut};
+
+// BAD: Copies data through Vec<u8>
+fn process_data(data: &[u8]) -> Vec<u8> {
+    let mut output = data.to_vec();  // Allocation + copy
+    transform(&mut output);
+    output
+}
+
+// GOOD: Zero-copy with Bytes (reference-counted, cheaply cloneable)
+fn process_data(data: Bytes) -> Bytes {
+    // .clone() is O(1) — just increments refcount
+    // .slice() is O(1) — returns a view
+    data.slice(HEADER_LEN..)
+}
+
+// Building up data with BytesMut
+fn encode_frame(payload: &[u8]) -> Bytes {
+    let mut buf = BytesMut::with_capacity(4 + payload.len());
+    buf.put_u32(payload.len() as u32);
+    buf.put_slice(payload);
+    buf.freeze()  // BytesMut -> Bytes (immutable, shareable)
+}
+```
+
+Use `Bytes` when data is read-only and shared across tasks. Use `BytesMut` when building up data. Both avoid copies that `Vec<u8>` would require.
+
 ### Avoid Allocations
 
 ```rust
 // SLOW: Allocates on each call
 fn process(items: &[Item]) -> Vec<String> {
-    items.iter().map(|i| i.name.clone()).collect()
+    let mut result = Vec::new();
+    for item in items {
+        result.push(item.name.clone());
+    }
+    result
 }
 
 // FAST: Reuse allocation
 fn process_reuse(items: &[Item], output: &mut Vec<String>) {
     output.clear();
-    output.extend(items.iter().map(|i| i.name.clone()));
+    for item in items {
+        output.push(item.name.clone());
+    }
 }
 
-// FAST: Return iterator instead of Vec
-fn process_iter(items: &[Item]) -> impl Iterator<Item = &str> {
-    items.iter().map(|i| i.name.as_str())
+// FAST: Pre-allocate
+fn process_prealloc(items: &[Item]) -> Vec<String> {
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        result.push(item.name.clone());
+    }
+    result
+}
+
+// FAST: Return references instead of cloning
+fn names<'a>(items: &'a [Item]) -> Vec<&'a str> {
+    let mut result = Vec::with_capacity(items.len());
+    for item in items {
+        result.push(item.name.as_str());
+    }
+    result
 }
 ```
 
 ### Choose Right Data Structure
 
-```rust
-// Lookup heavy → HashMap/HashSet (O(1) average)
-// Ordered iteration → BTreeMap/BTreeSet (O(log n))
-// Small collections (<100) → Vec (cache friendly)
-// Stack-like → Vec with push/pop
-// Queue-like → VecDeque
-// Frequent insert/remove middle → LinkedList (rare!)
-
-// Small string optimization
-use compact_str::CompactString;  // Inline <=24 bytes
-use smol_str::SmolStr;  // Inline <=22 bytes, immutable
-```
+| Access Pattern | Data Structure | Notes |
+|---------------|----------------|-------|
+| Lookup-heavy | `HashMap` / `DashMap` | O(1) average |
+| Ordered iteration | `BTreeMap` | O(log n) |
+| Small collections (<100) | `Vec` | Cache-friendly linear scan |
+| Stack-like | `Vec` with push/pop | O(1) amortized |
+| Queue-like | `VecDeque` | O(1) push/pop both ends |
+| Concurrent reads | `DashMap` | Lock-free sharded |
+| Bounded cache | `quick_cache::Cache` | LRU with size limit |
 
 ### Reduce Cloning
 
 ```rust
 // SLOW: Clone everything
-fn process(data: Data) -> Result<Output, Error> {
+fn process(data: &Data) {
     let name = data.name.clone();
     let items = data.items.clone();
-    // ...
 }
 
-// FAST: Borrow or move
-fn process(data: &Data) -> Result<Output, Error> {
-    let name = &data.name;  // Borrow
-    // ...
+// FAST: Borrow
+fn process(data: &Data) {
+    let name = &data.name;
 }
 
-fn process_owned(data: Data) -> Result<Output, Error> {
-    let Data { name, items, .. } = data;  // Move/destructure
-    // ...
+// FAST: Move / destructure
+fn process_owned(data: Data) {
+    let Data { name, items, .. } = data;
 }
 
-// Use Cow for maybe-clone
+// Cow for maybe-clone
 use std::borrow::Cow;
-fn process_cow(input: &str) -> Cow<str> {
-    if needs_modification(input) {
-        Cow::Owned(modify(input))
+fn normalize(input: &str) -> Cow<str> {
+    if input.contains('\t') {
+        Cow::Owned(input.replace('\t', "    "))
     } else {
         Cow::Borrowed(input)
     }
@@ -175,34 +201,56 @@ fn process_cow(input: &str) -> Cow<str> {
 use rayon::prelude::*;
 
 // Sequential
-let sum: i64 = items.iter().map(|x| x.compute()).sum();
+let mut results = Vec::new();
+for item in &items {
+    results.push(item.compute());
+}
 
-// Parallel (drop-in replacement)
-let sum: i64 = items.par_iter().map(|x| x.compute()).sum();
-
-// Only parallelize if work is substantial
-// Rule of thumb: >1μs per item, >1000 items
+// Parallel (only when work > ~1μs per item and > 1000 items)
+let results: Vec<_> = items.par_iter().map(|x| x.compute()).collect();
 ```
 
 ## Profiling Commands
 
 ```bash
 # CPU flamegraph (Linux)
-cargo install flamegraph
 cargo flamegraph --bin myapp
 
 # Memory profiling
-valgrind --tool=massif ./target/release/myapp
 heaptrack ./target/release/myapp
+valgrind --tool=massif ./target/release/myapp
+
+# UB and safety checks (slower but catches bugs)
+cargo careful test
 
 # Compile times
 cargo build --timings
-cargo +nightly build -Z timings
 
 # Binary size analysis
-cargo install cargo-bloat
 cargo bloat --release
 cargo bloat --release --crates
+
+# Target-specific optimizations
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+## Release Profile Tuning
+
+```toml
+# Cargo.toml
+[profile.release]
+lto = true           # Link-time optimization
+codegen-units = 1    # Better optimization, slower compile
+panic = "abort"      # Smaller binary, no unwinding
+strip = true         # Strip debug symbols
+
+[profile.release-fast]
+inherits = "release"
+opt-level = 3
+
+[profile.release-small]
+inherits = "release"
+opt-level = "z"      # Optimize for size
 ```
 
 ## Common Mistakes
@@ -213,35 +261,20 @@ cargo bloat --release --crates
 | Debug builds for perf | 10-100x slower | Use `--release` |
 | `clone()` in hot loop | Allocation overhead | Borrow or restructure |
 | `Vec` for FIFO | O(n) remove(0) | Use `VecDeque` |
-| `HashMap` for tiny data | Hash overhead | Use `Vec` + linear search |
-| Box<dyn Trait> in hot path | Vtable indirection | Use enum or generics |
-| Collecting to Vec then iterating | Extra allocation | Chain iterators |
-
-## Release Profile Tuning
-
-```toml
-# Cargo.toml
-[profile.release]
-lto = true           # Link-time optimization
-codegen-units = 1    # Better optimization, slower compile
-panic = "abort"      # Smaller binary, no unwinding
-
-[profile.release-fast]
-inherits = "release"
-opt-level = 3
-
-[profile.release-small]
-inherits = "release"
-opt-level = "z"      # Optimize for size
-strip = true
-```
+| `HashMap` for tiny data | Hash overhead | `Vec` + linear search |
+| `Box<dyn Trait>` in hot path | Vtable indirection | Use enum or generics |
+| `Vec<u8>` for shared buffers | Copy on every pass | Use `Bytes` |
+| Collecting then iterating | Extra allocation | Chain operations |
+| `Arc<RwLock<HashMap>>` contention | Lock bouncing | `DashMap` |
 
 ## Essential Crates
 
 - `criterion` - Statistical benchmarking
+- `bytes` - Zero-copy byte buffers
 - `rayon` - Data parallelism
+- `dashmap` - Lock-free concurrent HashMap
+- `quick_cache` - Bounded concurrent LRU cache
 - `parking_lot` - Faster mutexes
-- `hashbrown` - Faster HashMap (now in std)
 - `smallvec` - Stack allocation for small vecs
 - `compact_str` - Small string optimization
 - `bumpalo` - Arena allocator

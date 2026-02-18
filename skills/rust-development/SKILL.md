@@ -7,109 +7,58 @@ description: Use when writing, reviewing, or debugging Rust code. This is the pr
 
 ## Overview
 
-Your primary guide for Rust development. Covers the essential patterns for writing idiomatic, safe, and maintainable Rust code. For deep dives, use the specialized skills referenced below.
+Primary routing guide for Rust development. Identifies the right specialized skill for each task. When multiple concerns overlap, invoke skills in priority order: security → correctness → clarity → performance.
 
-## Quick Patterns
+## Skill Router
 
-### Iterators Over Loops
-```rust
-// Instead of: for i in 0..v.len() { v[i] }
-let result: Vec<_> = items.iter().filter(|x| x.valid).map(|x| x.name).collect();
-```
+| Situation | Skill | Trigger |
+|-----------|-------|---------|
+| Async code, Tokio, channels, select!, concurrency | `rust-async-patterns` | Any async fn, spawn, channel, runtime config |
+| Designing error types, thiserror/anyhow choice | `rust-error-handling` | New module, inconsistent error handling |
+| Writing tests, TDD, mocking, property testing | `rust-testing` | New code, bug fix, test infrastructure |
+| Profiling, benchmarks, reducing allocations | `rust-performance` | Measurably slow code, data structure choice |
+| Ownership, enums, let...else, newtypes | `rust-idiomatic-patterns` | C-style code, excessive cloning, bool flags |
+| Readability, naming, nesting, refactoring | `rust-code-clarity` | Hard-to-read code, deep nesting, long functions |
+| User input, auth, secrets, crypto, network | `rust-security-audit` | External data handling, credentials |
+| unsafe blocks, FFI, raw pointers, transmute | `rust-unsafe-audit` | Any unsafe code |
+| cargo audit, licenses, supply chain | `rust-dependency-audit` | Adding deps, security gates, cargo update |
 
-### Error Handling
-```rust
-// Use ? for propagation
-let content = std::fs::read_to_string(path)?;
-let config: Config = toml::from_str(&content)?;
-Ok(config)
-```
+## Red Flags
 
-### Option Handling
-```rust
-let value = opt.unwrap_or(default);
-let value = opt.unwrap_or_else(|| expensive());
-let mapped = opt.map(|x| transform(x));
-let result = opt.ok_or(Error::Missing)?;
-```
+These warrant immediate attention — invoke the corresponding skill:
 
-### Borrowing
-```rust
-// Accept slices, not Vec/String
-fn process(items: &[Item]) { }   // not &Vec<Item>
-fn greet(name: &str) { }         // not &String
-```
+| Code Smell | Risk | Skill |
+|------------|------|-------|
+| `.unwrap()` on external input | Panic/DoS | `rust-security-audit` |
+| `unsafe` block | Memory unsafety | `rust-unsafe-audit` |
+| String interpolation in SQL/commands | Injection | `rust-security-audit` |
+| `std::thread::sleep()` in async | Blocks runtime | `rust-async-patterns` |
+| Hardcoded secrets | Credential leak | `rust-security-audit` |
+| `clone()` in hot loop | Performance | `rust-performance` |
+| `matches!` macro | Misses field changes | `rust-idiomatic-patterns` |
+| Wildcard `_` in match arms | Misses new variants | `rust-idiomatic-patterns` |
+| `println!` / `eprintln!` | Not structured logging | `rust-idiomatic-patterns` |
 
-### Pattern Matching
-```rust
-match result {
-    Ok(v) if v > 0 => process(v),
-    Ok(_) => {},
-    Err(e) => log::warn!("{e}"),
-}
-```
+## Project Standards
 
-### Enums for State
-```rust
-enum State { Idle, Running { task: Task }, Error { msg: String } }
-// Instead of: is_running: bool, error: Option<String>
-```
+These apply across all skills — defined in CLAUDE.md:
 
-## Common Fixes
-
-| Problem | Fix |
-|---------|-----|
-| `for i in 0..len` | `.iter()` / `.iter_mut()` |
-| `.clone()` everywhere | Use `&T` references |
-| `if x.is_some() { x.unwrap() }` | `if let Some(x) = x` |
-| `.unwrap()` in library | Return `Result`, use `?` |
-| `&Vec<T>` parameter | `&[T]` slice |
-| Manual error match | `?` operator |
-| Bool flags for state | `enum` variants |
-| `String + &str` | `format!()` |
-
-## When to Use Specialized Skills
-
-| Situation | Use Skill |
-|-----------|-----------|
-| Handling user input, auth, secrets, crypto | `rust-security-audit` |
-| Reviewing `unsafe`, FFI, raw pointers | `rust-unsafe-audit` |
-| Writing tests, TDD, mocking, proptest | `rust-testing` |
-| Async/Tokio, deadlocks, channels, select! | `rust-async-patterns` |
-| Designing error types, thiserror/anyhow | `rust-error-handling` |
-| Profiling, benchmarks, optimization | `rust-performance` |
-| cargo audit, licenses, dependencies | `rust-dependency-audit` |
-| Deep nesting, unclear naming, refactoring | `rust-code-clarity` |
-| Full idiomatic patterns reference | `rust-idiomatic-patterns` |
-
-## Red Flags to Watch
-
-| Code Smell | Risk | Action |
-|------------|------|--------|
-| `.unwrap()` on external input | Panic/DoS | Validate, return Result |
-| `unsafe` block | Memory unsafety | Use `rust-unsafe-audit` |
-| String interpolation in SQL | Injection | Parameterize queries |
-| `sleep()` in async | Blocks runtime | Use `tokio::time::sleep` |
-| Hardcoded secrets | Credential leak | Use env vars, `secrecy` |
-| `Arc<Mutex<_>>` default | Overhead | `Rc<RefCell<_>>` if single-threaded |
+- **Loops**: Prefer `for` loops with mutable accumulators over iterator chains
+- **Matching**: No wildcard matches; no `matches!` macro — use explicit destructuring
+- **Early returns**: Use `let...else` to keep happy path unindented
+- **Types**: Newtypes over primitives (`UserId(u64)` not `u64`)
+- **Variables**: Shadow through transformations (no `raw_x`/`parsed_x` prefixes)
+- **State**: Enums for state machines, not boolean flags
+- **Errors**: `thiserror` for libraries, `anyhow` for applications
+- **Logging**: `tracing` (`error!`/`warn!`/`info!`/`debug!`), never `println!`
+- **Panics**: No `.unwrap()` — use `?`, `unwrap_or`, or `let...else`
 
 ## Essential Commands
 
 ```bash
-cargo clippy              # Lint for idioms
-cargo fmt                 # Format code
-cargo test                # Run tests
-cargo audit               # Security check
-cargo doc --open          # Generate docs
-```
-
-## Clippy Lints to Enable
-
-```toml
-# Cargo.toml or .clippy.toml
-[lints.clippy]
-needless_clone = "warn"
-manual_unwrap_or = "warn"
-ptr_arg = "warn"           # &Vec -> &[]
-single_match = "warn"
+cargo clippy --all-targets --all-features -- -D warnings   # Lint
+cargo fmt --all -- --check                                   # Format check
+cargo test --workspace --all-targets                         # Test
+cargo deny check                                             # Deps audit
+cargo careful test                                           # UB checks
 ```

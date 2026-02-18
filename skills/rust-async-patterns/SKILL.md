@@ -26,11 +26,16 @@ Write correct async Rust with Tokio. Avoid common pitfalls like blocking the run
 |------|---------|
 | CPU-bound work | `spawn_blocking` |
 | I/O-bound work | `spawn` |
-| Shared state | `Arc<Mutex<T>>` or channels |
+| Shared mutable state (concurrent) | `DashMap` or `Arc<RwLock<T>>` |
+| Shared mutable state (simple) | `Arc<Mutex<T>>` or channels |
 | Multiple tasks, first wins | `tokio::select!` |
 | Multiple tasks, all complete | `join!` or `JoinSet` |
 | Timeout | `tokio::time::timeout` |
 | Graceful shutdown | `CancellationToken` |
+| Backpressure / rate limiting | `tokio::sync::Semaphore` |
+| Signal one waiter | `tokio::sync::Notify` |
+| Structured concurrency | `TaskTracker` from `tokio-util` |
+| Processing async sequences | `Stream` + `StreamExt` |
 
 ## Core Patterns
 
@@ -53,18 +58,77 @@ async fn process() {
 
 // RIGHT: spawn for I/O-bound async work
 async fn fetch_all(urls: Vec<String>) -> Vec<Response> {
-    let handles: Vec<_> = urls
-        .into_iter()
-        .map(|url| tokio::spawn(fetch(url)))
-        .collect();
+    let mut set = JoinSet::new();
+    for url in urls {
+        set.spawn(fetch(url));
+    }
 
-    futures::future::join_all(handles)
-        .await
-        .into_iter()
-        .filter_map(Result::ok)
-        .collect()
+    let mut results = Vec::new();
+    while let Some(result) = set.join_next().await {
+        if let Ok(response) = result {
+            results.push(response);
+        }
+    }
+    results
 }
 ```
+
+### Semaphore for Backpressure
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+struct Gateway {
+    upload_semaphore: Arc<Semaphore>,
+    download_semaphore: Arc<Semaphore>,
+}
+
+impl Gateway {
+    fn new() -> Self {
+        Self {
+            upload_semaphore: Arc::new(Semaphore::new(500)),
+            download_semaphore: Arc::new(Semaphore::new(1000)),
+        }
+    }
+
+    async fn handle_upload(&self, data: Bytes) -> Result<(), Error> {
+        let _permit = self.upload_semaphore
+            .acquire()
+            .await
+            .map_err(|_| Error::ShuttingDown)?;
+
+        // Permit auto-drops when this scope exits
+        do_upload(data).await
+    }
+}
+```
+
+### DashMap for Lock-Free Concurrent State
+
+```rust
+use dashmap::DashMap;
+
+struct Registry {
+    miners: DashMap<NodeId, MinerInfo>,
+}
+
+impl Registry {
+    fn update_miner(&self, id: NodeId, info: MinerInfo) {
+        self.miners.insert(id, info);
+    }
+
+    fn get_miner(&self, id: &NodeId) -> Option<MinerInfo> {
+        self.miners.get(id).map(|r| r.value().clone())
+    }
+
+    fn remove_stale(&self, threshold: u64) {
+        self.miners.retain(|_, v| v.last_seen > threshold);
+    }
+}
+```
+
+Prefer `DashMap` over `Arc<RwLock<HashMap>>` for concurrent read-heavy workloads. Use `Arc<RwLock<HashMap>>` when you need to lock multiple keys atomically.
 
 ### select! for Racing
 
@@ -87,7 +151,7 @@ async fn run_server(shutdown: CancellationToken) {
                 handle_connection(conn).await;
             }
             _ = shutdown.cancelled() => {
-                println!("Shutting down");
+                tracing::info!("shutting down");
                 break;
             }
         }
@@ -101,56 +165,79 @@ async fn run_server(shutdown: CancellationToken) {
 use tokio::sync::mpsc;
 
 async fn producer_consumer() {
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, mut rx) = mpsc::channel(100);  // Bounded for backpressure
 
-    // Producer
     tokio::spawn(async move {
         for i in 0..10 {
-            tx.send(i).await.unwrap();
+            if tx.send(i).await.is_err() {
+                break;  // Receiver dropped
+            }
         }
     });
 
-    // Consumer
     while let Some(value) = rx.recv().await {
-        println!("Got: {value}");
+        tracing::debug!(value, "received");
     }
 }
-
-// Bounded for backpressure, unbounded for fire-and-forget
-// mpsc: multi-producer, single-consumer
-// broadcast: multi-producer, multi-consumer
-// oneshot: single value, single consumer
-// watch: single value, multi-consumer, latest only
 ```
 
-### Shared State
+| Channel | Use Case |
+|---------|----------|
+| `mpsc` (bounded) | Multi-producer, single-consumer with backpressure |
+| `mpsc` (unbounded) | Fire-and-forget (avoid in production — no backpressure) |
+| `broadcast` | Multi-producer, multi-consumer, all get every message |
+| `oneshot` | Single value, single consumer (request/response) |
+| `watch` | Single value, multi-consumer, latest-only (config updates) |
+
+### Notify for Signaling
 
 ```rust
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::Notify;
 
-// Tokio Mutex for async-aware locking
+struct WorkQueue {
+    notify: Arc<Notify>,
+    // ...
+}
+
+impl WorkQueue {
+    async fn push(&self, item: Work) {
+        // Add item to queue...
+        self.notify.notify_one();  // Wake one waiter
+    }
+
+    async fn wait_for_work(&self) -> Work {
+        loop {
+            if let Some(item) = self.try_pop() {
+                return item;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+```
+
+### Shared State with RwLock
+
+```rust
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
 struct SharedState {
-    data: Arc<Mutex<HashMap<String, String>>>,
+    data: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl SharedState {
     async fn get(&self, key: &str) -> Option<String> {
-        let guard = self.data.lock().await;
+        let guard = self.data.read().await;  // Multiple readers OK
         guard.get(key).cloned()
     }
 
     async fn set(&self, key: String, value: String) {
-        let mut guard = self.data.lock().await;
+        let mut guard = self.data.write().await;  // Exclusive write
         guard.insert(key, value);
-    }
+    }  // Lock dropped here — never hold across .await
 }
-
-// For read-heavy workloads
-use tokio::sync::RwLock;
-let data = Arc::new(RwLock::new(HashMap::new()));
-let read_guard = data.read().await;  // Multiple readers OK
-let write_guard = data.write().await;  // Exclusive write
 ```
 
 ### Cancellation Safety
@@ -163,7 +250,6 @@ async fn cancellable_work(token: CancellationToken) {
         select! {
             _ = do_work() => {}
             _ = token.cancelled() => {
-                // Cleanup before exit
                 cleanup().await;
                 return;
             }
@@ -171,13 +257,37 @@ async fn cancellable_work(token: CancellationToken) {
     }
 }
 
-// In main
 let token = CancellationToken::new();
 let task = tokio::spawn(cancellable_work(token.clone()));
-
-// Later, to cancel:
+// Later:
 token.cancel();
 task.await?;
+```
+
+### TaskTracker for Structured Concurrency
+
+```rust
+use tokio_util::task::TaskTracker;
+
+async fn serve(listener: TcpListener, shutdown: CancellationToken) {
+    let tracker = TaskTracker::new();
+
+    loop {
+        select! {
+            Ok((stream, _)) = listener.accept() => {
+                let token = shutdown.clone();
+                tracker.spawn(async move {
+                    handle_connection(stream, token).await;
+                });
+            }
+            _ = shutdown.cancelled() => break,
+        }
+    }
+
+    tracker.close();
+    tracker.wait().await;  // Wait for all connections to finish
+    tracing::info!("all connections drained");
+}
 ```
 
 ### JoinSet for Dynamic Tasks
@@ -187,16 +297,37 @@ use tokio::task::JoinSet;
 
 async fn process_batch(items: Vec<Item>) -> Vec<Result<Output, Error>> {
     let mut set = JoinSet::new();
-
     for item in items {
         set.spawn(async move { process(item).await });
     }
 
     let mut results = Vec::new();
     while let Some(result) = set.join_next().await {
-        results.push(result.unwrap());
+        match result {
+            Ok(output) => results.push(output),
+            Err(join_err) => tracing::error!(?join_err, "task panicked"),
+        }
     }
     results
+}
+```
+
+### Stream Processing
+
+```rust
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+
+async fn process_stream(rx: mpsc::Receiver<Event>) {
+    let stream = ReceiverStream::new(rx);
+
+    // Process with backpressure — only pulls when ready
+    let mut stream = stream
+        .filter(|e| e.is_relevant())
+        .chunks_timeout(100, Duration::from_secs(1));
+
+    while let Some(batch) = stream.next().await {
+        process_batch(batch).await;
+    }
 }
 ```
 
@@ -204,12 +335,14 @@ async fn process_batch(items: Vec<Item>) -> Vec<Result<Output, Error>> {
 
 | Mistake | Issue | Fix |
 |---------|-------|-----|
-| `std::sync::Mutex` in async | Blocks runtime | Use `tokio::sync::Mutex` |
-| `.await` in `spawn_blocking` | Can't await in sync context | Return value, await outside |
-| Holding lock across await | Deadlock risk | Clone data, drop lock early |
-| Ignoring `JoinHandle` | Task may be cancelled | `.await` or `abort()` explicitly |
+| `std::sync::Mutex` in async | Blocks runtime | `tokio::sync::Mutex` or `DashMap` |
+| `.await` in `spawn_blocking` | Can't await in sync | Return value, await outside |
+| Holding lock across `.await` | Deadlock risk | Clone data, drop lock before await |
+| Ignoring `JoinHandle` | Task may be cancelled | `.await` or store in `JoinSet` |
 | `block_on` inside async | Panic | Use `.await` or restructure |
-| Unbounded channels | Memory leak | Use bounded with backpressure |
+| Unbounded channels | Memory leak under load | Bounded with backpressure |
+| `Arc<RwLock<HashMap>>` for concurrent reads | Lock contention | `DashMap` |
+| No backpressure on spawned tasks | OOM under load | `Semaphore` or bounded channel |
 
 ## Runtime Configuration
 
@@ -234,7 +367,10 @@ let runtime = tokio::runtime::Builder::new_multi_thread()
 ## Essential Crates
 
 - `tokio` - Async runtime
-- `tokio-util` - CancellationToken, codec utilities
+- `tokio-util` - CancellationToken, TaskTracker, codec utilities
+- `tokio-stream` - Stream wrappers and combinators
+- `dashmap` - Lock-free concurrent HashMap
 - `futures` - Stream utilities, join_all
-- `async-trait` - Async methods in traits
-- `tracing` - Async-aware logging
+- `tracing` - Async-aware structured logging
+
+**Note:** `async-trait` is largely unnecessary since Rust 1.75+ supports `async fn` in traits natively. Only needed for `dyn Trait` dispatch with async methods.

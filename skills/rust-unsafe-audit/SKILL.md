@@ -66,9 +66,6 @@ fn get_value(ptr: *const i32) -> Option<i32> {
 ### FFI Boundaries
 
 ```rust
-// C function signature
-// int process_data(const char* input, size_t len, char* output, size_t* out_len);
-
 extern "C" {
     fn process_data(
         input: *const c_char,
@@ -133,8 +130,8 @@ unsafe impl Sync for MyWrapper {}
 let bytes: [u8; 4] = unsafe { std::mem::transmute(value) };
 
 // GOOD: Use safe alternatives
-let bytes = value.to_ne_bytes();  // For integers
-let bytes = value.to_le_bytes();  // Explicit endianness
+let bytes = value.to_ne_bytes();   // For integers
+let bytes = value.to_le_bytes();   // Explicit endianness
 
 // For slices
 let byte_slice: &[u8] = bytemuck::bytes_of(&value);
@@ -186,8 +183,14 @@ unsafe {
 
 ## Tools for Unsafe Auditing
 
-- `cargo miri` - Detects UB at runtime
-- `cargo careful` - Extra runtime checks
-- `-Z sanitizer=address` - Memory errors
-- `clippy::undocumented_unsafe_blocks` - Enforce comments
-- `cargo-geiger` - Count unsafe in dependencies
+```bash
+cargo miri test              # Detects UB at runtime
+cargo careful test           # Extra runtime checks (stdlib debug assertions)
+cargo +nightly -Z sanitizer=address test  # Memory errors
+cargo geiger                 # Count unsafe in dependencies
+```
+
+Enable the clippy lint to enforce documentation:
+```
+clippy::undocumented_unsafe_blocks
+```

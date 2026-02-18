@@ -7,107 +7,157 @@ description: Use when writing or reviewing Rust code that could benefit from idi
 
 ## Overview
 
-Transform Rust code to leverage the language's strengths: ownership, iterators, pattern matching, and zero-cost abstractions. Idiomatic Rust is safer, more readable, and often faster.
+Write Rust that leverages the language's strengths: ownership, pattern matching, enums, and zero-cost abstractions. Aligned with project CLAUDE.md conventions.
 
 ## When to Use
 
-- C-style `for i in 0..len` loops
 - Excessive `.clone()` calls
 - Manual `if x.is_some() { x.unwrap() }` patterns
-- Ignoring `Result` with `let _ =`
-- String concatenation with `+`
 - Boolean flags instead of enums
+- Ignoring `Result` with `let _ =`
+- `matches!` macro instead of explicit destructuring
+- Wildcard `_` catch-all in match arms
+- `raw_x` / `parsed_x` variable naming instead of shadowing
+- `println!` instead of `tracing`
 
-**Not for:** Security review (use `rust-security-audit`), simplification (use `rust-code-clarity`)
+**Not for:** Security review (use `rust-security-audit`), readability cleanup (use `rust-code-clarity`)
 
 ## Quick Reference
 
 | Non-Idiomatic | Idiomatic |
 |---------------|-----------|
-| `for i in 0..v.len()` | `for item in &v` or `v.iter()` |
-| `if x.is_some() { x.unwrap() }` | `if let Some(x) = x` |
-| `opt.is_some() ? opt.unwrap() : default` | `opt.unwrap_or(default)` |
-| `opt.map(\|x\| x).unwrap_or(default)` | `opt.unwrap_or(default)` |
+| `if x.is_some() { x.unwrap() }` | `let...else` or `if let` |
+| `matches!(x, Variant::A)` | Explicit match or `if let` |
+| `_ => {}` catch-all | Name every variant |
 | `.clone()` everywhere | Use references `&T` |
-| `fn foo(v: &Vec<T>)` | `fn foo(v: &[T])` (slice) |
+| `fn foo(v: &Vec<T>)` | `fn foo(v: &[T])` |
 | `fn foo(s: &String)` | `fn foo(s: &str)` |
 | `match x { Ok(v) => v, Err(e) => return Err(e) }` | `x?` |
-| `String + &str + &str` | `format!()` or `push_str` |
 | `bool` flags for state | `enum` with variants |
-| `Vec::new(); v.push(); v.push()` | `vec![a, b]` |
-| Nested `if let` | `match` or `?` chains |
+| `raw_input` / `parsed_input` | Shadow: `let input = parse(input);` |
+| `u64` for domain IDs | Newtype: `struct UserId(u64)` |
+| `println!("debug: {x}")` | `tracing::debug!("{x}")` |
+| Iterator chain with `.filter().map().collect()` | `for` loop with mutable accumulator |
 
 ## Core Patterns
 
-### Iterators Over Loops
+### For Loops Over Iterator Chains
 
 ```rust
-// NON-IDIOMATIC
-let mut result = Vec::new();
-for i in 0..items.len() {
-    if items[i].is_valid() {
-        result.push(items[i].transform());
-    }
-}
-
-// IDIOMATIC
+// NON-IDIOMATIC (per project convention): long iterator chain
 let result: Vec<_> = items
     .iter()
     .filter(|item| item.is_valid())
     .map(|item| item.transform())
     .collect();
-```
 
-### Ownership and Borrowing
-
-```rust
-// NON-IDIOMATIC: Unnecessary cloning
-fn process(data: &Data) -> String {
-    let owned = data.clone();  // Why clone?
-    owned.name.clone()
-}
-
-// IDIOMATIC: Borrow what you need
-fn process(data: &Data) -> &str {
-    &data.name
+// IDIOMATIC: for loop with mutable accumulator
+let mut result = Vec::new();
+for item in &items {
+    if item.is_valid() {
+        result.push(item.transform());
+    }
 }
 ```
 
-### Error Propagation
+Short, simple transforms (single `.map()` or `.filter()`) are fine as iterators. Prefer `for` loops when the chain exceeds two combinators or involves side effects.
+
+### let...else for Early Returns
 
 ```rust
-// NON-IDIOMATIC
-fn read_config() -> Result<Config, Error> {
-    let content = match std::fs::read_to_string("config.toml") {
-        Ok(c) => c,
-        Err(e) => return Err(e.into()),
+// NON-IDIOMATIC: nested if-let
+fn process(input: Option<&str>) -> Result<Output, Error> {
+    if let Some(value) = input {
+        if let Ok(parsed) = value.parse::<u64>() {
+            do_work(parsed)
+        } else {
+            Err(Error::InvalidNumber)
+        }
+    } else {
+        Err(Error::MissingInput)
+    }
+}
+
+// IDIOMATIC: let...else keeps happy path unindented
+fn process(input: Option<&str>) -> Result<Output, Error> {
+    let Some(value) = input else {
+        return Err(Error::MissingInput);
     };
-    let config = match toml::from_str(&content) {
-        Ok(c) => c,
-        Err(e) => return Err(e.into()),
+    let Ok(parsed) = value.parse::<u64>() else {
+        return Err(Error::InvalidNumber);
     };
-    Ok(config)
-}
-
-// IDIOMATIC
-fn read_config() -> Result<Config, Error> {
-    let content = std::fs::read_to_string("config.toml")?;
-    let config = toml::from_str(&content)?;
-    Ok(config)
+    do_work(parsed)
 }
 ```
 
-### Enums for State
+### Newtypes Over Primitives
 
 ```rust
-// NON-IDIOMATIC
+// NON-IDIOMATIC: bare primitives lose meaning
+fn transfer(from: u64, to: u64, amount: u64) { }
+transfer(amount, user_id, account_id);  // Compiles! Args swapped.
+
+// IDIOMATIC: newtypes prevent mixups at compile time
+struct UserId(u64);
+struct AccountId(u64);
+struct Amount(u64);
+
+fn transfer(from: AccountId, to: AccountId, amount: Amount) { }
+// transfer(amount, user_id, account_id);  // Won't compile
+```
+
+### Shadow Variables Through Transformations
+
+```rust
+// NON-IDIOMATIC: prefixed names
+let raw_input = get_input();
+let trimmed_input = raw_input.trim();
+let parsed_input: Config = toml::from_str(trimmed_input)?;
+
+// IDIOMATIC: shadow through transformations
+let input = get_input();
+let input = input.trim();
+let input: Config = toml::from_str(input)?;
+```
+
+### Explicit Destructuring Over Wildcards
+
+```rust
+enum Command { Start, Stop, Pause, Resume }
+
+// NON-IDIOMATIC: wildcard hides new variants
+match cmd {
+    Command::Start => start(),
+    _ => {}  // Adding Command::Resume won't warn
+}
+
+// IDIOMATIC: name every variant
+match cmd {
+    Command::Start => start(),
+    Command::Stop | Command::Pause | Command::Resume => {}
+}
+
+// NON-IDIOMATIC: matches! macro hides variant changes
+if matches!(cmd, Command::Start | Command::Stop) { handle(); }
+
+// IDIOMATIC: explicit match
+match cmd {
+    Command::Start | Command::Stop => handle(),
+    Command::Pause | Command::Resume => {}
+}
+```
+
+### Enums for State Machines
+
+```rust
+// NON-IDIOMATIC: boolean flags
 struct Connection {
     is_connected: bool,
     is_authenticated: bool,
     error_message: Option<String>,
 }
 
-// IDIOMATIC
+// IDIOMATIC: enum with data in variants
 enum ConnectionState {
     Disconnected,
     Connected,
@@ -116,74 +166,80 @@ enum ConnectionState {
 }
 ```
 
-### Pattern Matching
+### Ownership and Borrowing
 
 ```rust
-// NON-IDIOMATIC
-if result.is_ok() {
-    let value = result.unwrap();
-    if value > 0 {
-        process(value);
-    }
+// NON-IDIOMATIC: unnecessary cloning
+fn process(data: &Data) -> String {
+    let owned = data.clone();
+    owned.name.clone()
 }
 
-// IDIOMATIC
-if let Ok(value) = result {
-    if value > 0 {
-        process(value);
-    }
+// IDIOMATIC: borrow what you need
+fn process(data: &Data) -> &str {
+    &data.name
+}
+```
+
+### Error Propagation
+
+```rust
+// NON-IDIOMATIC: manual match
+fn read_config() -> Result<Config, Error> {
+    let content = match std::fs::read_to_string("config.toml") {
+        Ok(c) => c,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(toml::from_str(&content)?)
 }
 
-// EVEN BETTER with guards
-match result {
-    Ok(value) if value > 0 => process(value),
-    Ok(_) => {},  // Zero or negative
-    Err(e) => log::warn!("Failed: {e}"),
+// IDIOMATIC: ? operator
+fn read_config() -> Result<Config, Error> {
+    let content = std::fs::read_to_string("config.toml")?;
+    let config = toml::from_str(&content)?;
+    Ok(config)
 }
 ```
 
 ### Option/Result Combinators
 
 ```rust
-// NON-IDIOMATIC: Manual unwrap with default
-let value = if opt.is_some() { opt.unwrap() } else { 0 };
-
-// IDIOMATIC: unwrap_or
 let value = opt.unwrap_or(0);
-
-// For expensive defaults, use unwrap_or_else
-let value = opt.unwrap_or_else(|| compute_default());
-
-// For Default trait
+let value = opt.unwrap_or_else(|| expensive_default());
 let value = opt.unwrap_or_default();
-
-// Transform with map
-let doubled = opt.map(|x| x * 2);  // Option<i32> -> Option<i32>
-
-// Chain operations with and_then (flatMap)
-let result = opt
-    .and_then(|x| validate(x))     // Option -> Option
-    .map(|x| transform(x));
-
-// Convert Option to Result
-let result = opt.ok_or(Error::Missing)?;
+let value = opt.ok_or(Error::Missing)?;
+let doubled = opt.map(|x| x * 2);
+let result = opt.and_then(|x| validate(x));
 ```
 
 ### Function Parameter Types
 
 ```rust
-// NON-IDIOMATIC: Overly specific
-fn process(items: &Vec<String>) { ... }
-fn greet(name: &String) { ... }
+// NON-IDIOMATIC: overly specific
+fn process(items: &Vec<String>) { }
+fn greet(name: &String) { }
 
-// IDIOMATIC: Accept slices for flexibility
-fn process(items: &[String]) { ... }  // Accepts Vec, array, slice
-fn greet(name: &str) { ... }          // Accepts String, &str, Cow<str>
+// IDIOMATIC: accept slices
+fn process(items: &[String]) { }   // Accepts Vec, array, slice
+fn greet(name: &str) { }           // Accepts String, &str, Cow<str>
 
-// For ownership transfer, use generics
+// For ownership transfer
 fn store(name: impl Into<String>) {
-    let name: String = name.into();  // Accepts String or &str
+    let name: String = name.into();
 }
+```
+
+### Logging with tracing
+
+```rust
+// NON-IDIOMATIC
+println!("Processing user {user_id}");
+eprintln!("Error: {err}");
+
+// IDIOMATIC
+tracing::info!(user_id, "processing user");
+tracing::error!(?err, "operation failed");
+tracing::debug!(shard_count = shards.len(), "distribution complete");
 ```
 
 ## Common Mistakes
@@ -192,15 +248,24 @@ fn store(name: impl Into<String>) {
 |---------|-------|-----|
 | `to_string()` on `&str` param | Unnecessary allocation | Accept `impl AsRef<str>` |
 | `Box<dyn Trait>` everywhere | Runtime cost | Use generics `impl Trait` |
-| `Arc<Mutex<_>>` by default | Overhead | Start with `Rc<RefCell<_>>` if single-threaded |
+| `Arc<Mutex<_>>` by default | Overhead | `Rc<RefCell<_>>` if single-threaded |
 | Manual `Drop` impl | Usually wrong | Let compiler handle it |
 | `pub` on everything | Leaky API | Start private, expose as needed |
+| `matches!` macro | Misses new fields/variants | Explicit destructuring |
+| Wildcard `_` in match | Misses new variants | Name all variants |
+| Long iterator chains | Hard to read/debug | `for` loop with accumulator |
 
 ## Clippy Alignment
 
-Run `cargo clippy` and address:
-- `clippy::needless_clone`
-- `clippy::manual_map`
-- `clippy::manual_unwrap_or`
-- `clippy::iter_nth_zero`
-- `clippy::single_match`
+These lints enforce the patterns above:
+
+```
+clippy::wildcard_enum_match_arm
+clippy::match_wildcard_for_single_variants
+clippy::needless_clone
+clippy::manual_unwrap_or
+clippy::ptr_arg
+clippy::print_stdout
+clippy::print_stderr
+clippy::dbg_macro
+```

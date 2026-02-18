@@ -24,16 +24,17 @@ Simplify Rust code for readability and maintainability. Focus on reducing cognit
 
 | Problem | Solution |
 |---------|----------|
-| Deep nesting | Early returns, guard clauses |
+| Deep nesting | `let...else`, guard clauses, early returns |
 | Long functions | Extract helper functions |
 | Complex conditions | Named booleans, extract predicates |
 | Unclear names | `process_user_input` not `proc` |
 | Magic numbers | Named constants |
 | Repeated patterns | Extract to functions/traits |
+| Variable name chains | Shadow through transformations |
 
 ## Core Techniques
 
-### Early Returns (Guard Clauses)
+### let...else for Flat Control Flow
 
 ```rust
 // UNCLEAR: Deep nesting
@@ -41,7 +42,6 @@ fn process(user: Option<User>) -> Result<Output, Error> {
     if let Some(user) = user {
         if user.is_active {
             if user.has_permission("write") {
-                // actual logic buried here
                 Ok(do_work(&user))
             } else {
                 Err(Error::NoPermission)
@@ -54,9 +54,11 @@ fn process(user: Option<User>) -> Result<Output, Error> {
     }
 }
 
-// CLEAR: Guard clauses
+// CLEAR: let...else + guard clauses
 fn process(user: Option<User>) -> Result<Output, Error> {
-    let user = user.ok_or(Error::NoUser)?;
+    let Some(user) = user else {
+        return Err(Error::NoUser);
+    };
     if !user.is_active {
         return Err(Error::Inactive);
     }
@@ -65,6 +67,22 @@ fn process(user: Option<User>) -> Result<Output, Error> {
     }
     Ok(do_work(&user))
 }
+```
+
+### Shadow Variables for Transformations
+
+```rust
+// UNCLEAR: name proliferation
+let raw_config = read_file(path)?;
+let parsed_config = toml::from_str(&raw_config)?;
+let validated_config = validate(parsed_config)?;
+use_config(validated_config);
+
+// CLEAR: shadow through transformations
+let config = read_file(path)?;
+let config = toml::from_str(&config)?;
+let config = validate(config)?;
+use_config(config);
 ```
 
 ### Named Conditions
@@ -77,7 +95,8 @@ if user.role == Role::Admin || (user.role == Role::Mod && post.author_id == user
 
 // CLEAR
 let is_admin = user.role == Role::Admin;
-let is_mod_deleting_own = user.role == Role::Mod && post.author_id == user.id;
+let is_mod_deleting_own = user.role == Role::Mod
+    && post.author_id == user.id;
 let can_delete = is_admin || is_mod_deleting_own;
 
 if can_delete {
@@ -96,15 +115,11 @@ fn handle_request(req: Request) -> Response {
 }
 
 // CLEAR: Single responsibility
-fn handle_request(req: Request) -> Response {
+fn handle_request(req: Request) -> Result<Response, Error> {
     let validated = validate_request(&req)?;
     let result = process_data(&validated)?;
-    format_response(result)
+    Ok(format_response(result))
 }
-
-fn validate_request(req: &Request) -> Result<ValidatedRequest, Error> { ... }
-fn process_data(req: &ValidatedRequest) -> Result<Data, Error> { ... }
-fn format_response(data: Data) -> Response { ... }
 ```
 
 ### Meaningful Names
@@ -122,7 +137,7 @@ fn proc(d: &[u8], f: bool) -> Vec<u8> {
 
 // CLEAR
 fn transform_bytes(input: &[u8], uppercase: bool) -> Vec<u8> {
-    let mut output = Vec::new();
+    let mut output = Vec::with_capacity(input.len());
     for byte in input {
         if uppercase {
             output.push(byte.to_ascii_uppercase());
@@ -156,10 +171,11 @@ if response.status >= CLIENT_ERROR_MIN && response.status < CLIENT_ERROR_MAX {
 
 1. **Names**: Can someone understand intent without reading implementation?
 2. **Length**: Functions under 40 lines, files under 500 lines?
-3. **Nesting**: Max 3 levels of indentation?
+3. **Nesting**: Max 3 levels of indentation? Use `let...else` to flatten.
 4. **Single responsibility**: Each function does one thing?
 5. **Magic values**: All literals named or obvious?
-6. **DRY**: No copy-pasted logic blocks?
+6. **Shadowing**: Using `let x = transform(x)` instead of `raw_x`/`new_x`?
+7. **DRY**: No copy-pasted logic blocks?
 
 ## Common Mistakes
 
@@ -170,6 +186,7 @@ if response.status >= CLIENT_ERROR_MIN && response.status < CLIENT_ERROR_MAX {
 | Generic names | `data`, `result`, `temp` | Name by purpose |
 | Comment-heavy code | Usually means unclear code | Refactor to be self-documenting |
 | Premature optimization | Clever but unreadable | Optimize only proven bottlenecks |
+| Name chains | `raw_x`, `parsed_x`, `final_x` | Shadow: `let x = parse(x)` |
 
 ## When to Stop
 

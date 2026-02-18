@@ -7,7 +7,7 @@ description: Use when auditing Rust dependencies with cargo audit, cargo deny, o
 
 ## Overview
 
-Audit Rust dependencies for security, licensing, and supply chain risks. Every dependency is code you trust - verify that trust is warranted.
+Audit Rust dependencies for security, licensing, and supply chain risks. Every dependency is code you trust — verify that trust is warranted.
 
 ## When to Use
 
@@ -35,7 +35,6 @@ Audit Rust dependencies for security, licensing, and supply chain risks. Every d
 
 ```bash
 # 1. Check for known vulnerabilities
-cargo install cargo-audit
 cargo audit
 
 # 2. Update advisory database
@@ -55,28 +54,17 @@ ignore = ["RUSTSEC-2023-0001"]  # Document why!
 ### View Dependency Tree
 
 ```bash
-# Full tree
-cargo tree
-
-# Why is X included?
-cargo tree -i regex
-
-# Duplicated versions
-cargo tree -d
-
-# Features enabled
-cargo tree -f "{p} {f}"
-
-# Direct deps only
-cargo tree --depth 1
+cargo tree                   # Full tree
+cargo tree -i regex          # Why is X included?
+cargo tree -d                # Duplicated versions
+cargo tree -f "{p} {f}"     # Features enabled
+cargo tree --depth 1         # Direct deps only
 ```
 
 ### Unsafe Code Analysis
 
 ```bash
-cargo install cargo-geiger
 cargo geiger
-
 # Output shows unsafe usage per crate:
 # Functions  Expressions  Impls  Traits  Methods
 # 0/0        0/0          0/0    0/0     0/0      crate_name
@@ -85,7 +73,6 @@ cargo geiger
 ## License Compliance with cargo-deny
 
 ```bash
-cargo install cargo-deny
 cargo deny init  # Creates deny.toml
 cargo deny check licenses
 ```
@@ -101,16 +88,14 @@ allow = [
     "ISC",
     "Zlib",
 ]
-copyleft = "deny"  # Reject GPL, LGPL, etc.
+copyleft = "deny"
 
 [licenses.exceptions]
-# Specific exceptions with justification
 ring = ["ISC", "MIT", "OpenSSL"]
 
 [bans]
-multiple-versions = "warn"  # Flag duplicate versions
+multiple-versions = "warn"
 deny = [
-    # Crates you never want
     { name = "openssl" },  # Prefer rustls
 ]
 
@@ -122,7 +107,6 @@ unmaintained = "warn"
 ## Supply Chain Verification with cargo-vet
 
 ```bash
-cargo install cargo-vet
 cargo vet init
 cargo vet
 
@@ -167,16 +151,20 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@34899fc7ba81ca6268d5947a7a16b4649013fea1  # v2.0.11
 ```
 
 ## Red Flags
@@ -201,21 +189,15 @@ jobs:
 | No license check | Legal liability | Use `cargo deny` |
 | Trusting all deps | Supply chain attack | Use `cargo vet` |
 | `*` version | Breaking updates | Pin to semver range |
+| Unpinned CI actions | Supply chain risk | Pin to SHA with version comment |
 
 ## Update Strategy
 
 ```bash
-# See what's outdated
-cargo outdated
-
-# Update conservatively
-cargo update -p specific-crate
-
-# Update all (test thoroughly after)
-cargo update
-
-# Check for breaking changes
-cargo upgrade --dry-run  # cargo-edit
+cargo outdated                    # See what's outdated
+cargo update -p specific-crate   # Update conservatively
+cargo update                     # Update all (test thoroughly)
+cargo upgrade --dry-run           # Check for breaking changes (cargo-edit)
 ```
 
 ## Essential Tools

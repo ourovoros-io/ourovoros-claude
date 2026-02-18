@@ -7,7 +7,7 @@ description: Use when designing error types for a Rust library or application, w
 
 ## Overview
 
-Design clear, usable error types in Rust. Libraries need structured errors for callers to match on. Applications need ergonomic error handling with context.
+Design clear, usable error types in Rust. Libraries need structured errors for callers to match on. Applications need ergonomic error handling with context. Use `tracing` to log errors with structured fields.
 
 ## When to Use
 
@@ -53,11 +53,11 @@ pub enum ParseError {
     Utf8(#[from] std::string::FromUtf8Error),
 }
 
-// Usage - callers can match on variants
+// Callers can match on variants
 match parse(input) {
     Ok(ast) => process(ast),
     Err(ParseError::InvalidSyntax { line, .. }) => {
-        eprintln!("Fix syntax error on line {line}");
+        tracing::error!(line, "syntax error in input");
     }
     Err(e) => return Err(e.into()),
 }
@@ -82,13 +82,6 @@ fn load_config(path: &str) -> Result<Config> {
     }
 
     Ok(config)
-}
-
-// In main
-fn main() -> Result<()> {
-    let config = load_config("app.toml")?;
-    run(config)?;
-    Ok(())
 }
 
 // Error output includes context chain:
@@ -149,9 +142,9 @@ impl From<serde_json::Error> for ServiceError {
 // Define once in lib.rs or error.rs
 pub type Result<T> = std::result::Result<T, MyError>;
 
-// Use throughout crate
+// Use throughout crate — no need to specify error type
 pub fn process(input: &str) -> Result<Output> {
-    // No need to specify error type
+    // ...
 }
 ```
 
@@ -165,7 +158,7 @@ pub enum LibError {
     Parse(#[from] ParseError),
 }
 
-// In application using the library: anyhow for context
+// In application: anyhow for context
 use anyhow::{Context, Result};
 
 fn run() -> Result<()> {
@@ -175,17 +168,44 @@ fn run() -> Result<()> {
 }
 ```
 
+### Error Logging with tracing
+
+```rust
+// Log errors with structured context
+fn handle_request(req: Request) -> Result<Response> {
+    let result = process(&req).map_err(|e| {
+        tracing::error!(
+            request_id = %req.id,
+            path = %req.path,
+            ?e,
+            "request processing failed"
+        );
+        e
+    })?;
+    Ok(result)
+}
+
+// Or use tracing's instrument for automatic context
+#[tracing::instrument(skip(data), err)]
+fn process(data: &[u8]) -> Result<Output> {
+    // Errors auto-logged with function args as span fields
+    let parsed = parse(data)?;
+    Ok(transform(parsed))
+}
+```
+
 ## Common Mistakes
 
 | Mistake | Issue | Fix |
 |---------|-------|-----|
 | `String` as error type | No structure, can't match | Use enum with variants |
 | `Box<dyn Error>` everywhere | Loses type info | Use `thiserror` enum |
-| Swallowing errors | Silent failures | Propagate or log |
+| Swallowing errors | Silent failures | Propagate or log with tracing |
 | `.unwrap()` in library | Panic in user code | Return Result |
 | `anyhow` in library public API | Can't match on errors | Use `thiserror` |
 | No context on `?` | Unclear error source | Add `.context()` |
 | Giant error enums | Exposes internals | Group by domain |
+| `eprintln!` for errors | Unstructured, not captured | `tracing::error!` |
 
 ## Error Handling Checklist
 
@@ -194,6 +214,7 @@ fn run() -> Result<()> {
 3. **Is context preserved?** Use `#[from]` or `.context()`
 4. **Are errors actionable?** Include relevant data in variants
 5. **Is the error type public?** Only expose what callers need
+6. **Are errors logged?** Use `tracing` with structured fields
 
 ## Essential Crates
 
@@ -201,4 +222,4 @@ fn run() -> Result<()> {
 - `anyhow` - Flexible error handling for applications
 - `miette` - Fancy diagnostic errors with source snippets
 - `color-eyre` - Colorful error reports
-- `tracing-error` - Capture tracing spans in errors
+- `tracing` - Structured error logging with spans
