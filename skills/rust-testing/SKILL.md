@@ -7,7 +7,7 @@ description: Use when writing tests for Rust code, implementing TDD, or setting 
 
 ## Overview
 
-Write effective tests in Rust using cargo test, property-based testing, and mocking. Focus on tests that catch real bugs and remain maintainable.
+Write effective tests in Rust using cargo-nextest, property-based testing, and mocking. Focus on tests that catch real bugs and remain maintainable.
 
 ## When to Use
 
@@ -24,23 +24,30 @@ Write effective tests in Rust using cargo test, property-based testing, and mock
 
 | Need | Approach |
 |------|----------|
+| Test runner | `cargo nextest run` (process-per-test isolation) |
 | Unit test | `#[test]` in same file or `tests` module |
 | Integration test | `tests/` directory |
 | Async test | `#[tokio::test]` |
+| Time-dependent async | `#[tokio::test(start_paused = true)]` |
 | Property test | `proptest!` macro |
 | Mutation test | `cargo mutants` |
+| Fuzz test | `cargo fuzz run target` (nightly) |
+| Concurrency test | `loom` (exhaustive interleaving) |
 | Mock trait | `mockall` crate |
 | Test fixtures | `rstest` crate |
 | Snapshot test | `insta` crate |
+| CLI test | `assert_cmd` + `predicates` |
+| Container test | `testcontainers` |
 | Expect panic | `#[should_panic]` |
 | Skip slow test | `#[ignore]` |
-| Float comparison | `approx` crate or epsilon check |
-| UB detection | `cargo careful test` |
+| Log assertions | `tracing-test` |
+| Log visibility | `test-log` |
+| UB detection | `cargo +nightly miri test` |
 
 ## Test Organization
 
 ```rust
-// src/lib.rs or src/parser.rs
+// src/parser.rs
 pub fn parse(input: &str) -> Result<Ast, ParseError> {
     // implementation
 }
@@ -51,7 +58,7 @@ mod tests {
 
     #[test]
     fn parse_empty_returns_empty_ast() {
-        let result = parse("").unwrap();
+        let result = parse("").expect("should parse empty input");
         assert!(result.nodes.is_empty());
     }
 
@@ -63,51 +70,9 @@ mod tests {
 }
 ```
 
-## Testing Patterns
+**Integration tests** go in `tests/` directory. Shared helpers use `tests/common/mod.rs` (not `tests/common.rs`).
 
-### Test Result Types
-
-```rust
-#[test]
-fn test_with_result() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load("test.toml")?;
-    assert_eq!(config.name, "test");
-    Ok(())
-}
-```
-
-### Testing Panics and Ignoring Tests
-
-```rust
-#[test]
-#[should_panic(expected = "division by zero")]
-fn divide_by_zero_panics() {
-    divide(10, 0);
-}
-
-#[test]
-#[ignore]  // Run with: cargo test -- --ignored
-fn slow_integration_test() {
-    // Expensive test
-}
-```
-
-### Floating-Point Comparisons
-
-```rust
-// BAD: Direct equality fails due to precision
-assert_eq!(0.1 + 0.2, 0.3);  // FAILS!
-
-// GOOD: Epsilon comparison
-let result = 0.1 + 0.2;
-assert!((result - 0.3).abs() < f64::EPSILON * 10.0);
-
-// BETTER: approx crate
-use approx::assert_relative_eq;
-assert_relative_eq!(0.1 + 0.2, 0.3, epsilon = 1e-10);
-```
-
-### Async Tests
+## Async Tests
 
 ```rust
 #[tokio::test]
@@ -117,37 +82,33 @@ async fn test_async_fetch() {
     assert!(result.is_ok());
 }
 
-// Multi-threaded runtime for tests that need it
+// Multi-threaded runtime for tests that need true concurrency
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_access() {
-    // ...
-}
-
-// Timeout via tokio (not an attribute — wrap in the test body)
-#[tokio::test]
-async fn test_with_timeout() {
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        slow_operation(),
-    ).await;
-    assert!(result.is_ok(), "operation timed out");
+    let handle = tokio::spawn(async { compute().await });
+    handle.await.expect("task panicked");
 }
 ```
 
-### Capturing tracing Output in Tests
+### Time-dependent tests with `start_paused`
 
 ```rust
-// Use test_log crate to see tracing output during test failures
-use test_log::test;
-
-#[test(tokio::test)]
-async fn test_with_logging() {
-    tracing::info!("this shows on test failure");
-    assert!(some_operation().await.is_ok());
+// Time advances instantly when awaited -- no real waiting
+#[tokio::test(start_paused = true)]
+async fn test_timeout_behavior() {
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    // Runs immediately, not after an hour
 }
 ```
 
-### Property-Based Testing
+### Common async test mistakes
+
+1. **Wrong runtime flavor:** `#[tokio::test]` defaults to `current_thread`. Spawned tasks may not progress without `multi_thread`.
+2. **Real sleeps:** Without `start_paused`, `tokio::time::sleep` actually sleeps.
+3. **Blocking the runtime:** Sync I/O on the async runtime starves other tasks -- use `spawn_blocking`.
+4. **Not testing cancellation safety:** Drop futures mid-execution and verify state consistency.
+
+## Property-Based Testing with proptest
 
 ```rust
 use proptest::prelude::*;
@@ -169,20 +130,142 @@ proptest! {
 }
 ```
 
-### Mutation Testing
+Use `prop_assert!` / `prop_assert_eq!` inside proptest blocks (not `assert!`).
 
-Verify tests actually catch bugs — not just that they pass:
+### Custom strategies with prop_compose!
 
-```bash
-cargo install cargo-mutants
-cargo mutants                    # Run all mutations
-cargo mutants -p my_crate       # Specific crate
-cargo mutants -- --test-threads=4  # Parallel
+```rust
+prop_compose! {
+    fn arb_order()(
+        id in 1u64..1_000_000,
+        quantity in 1u32..1000,
+        price_cents in 1u64..100_000_00
+    ) -> Order {
+        Order { id, quantity, price_cents }
+    }
+}
+
+proptest! {
+    #[test]
+    fn order_total_positive(order in arb_order()) {
+        let total = u64::from(order.quantity) * order.price_cents;
+        prop_assert!(total > 0);
+    }
+}
 ```
 
-Mutation testing modifies your code (removing conditions, changing operators) and checks that at least one test fails. Surviving mutants = gaps in test coverage.
+**Failure persistence:** proptest writes failing cases to `proptest-regressions/` files. Commit these to version control.
 
-### Mocking with mockall
+## Fuzz Testing with cargo-fuzz
+
+For parsers, deserializers, and any code handling untrusted input:
+
+```rust
+// fuzz/fuzz_targets/parse_input.rs
+#![no_main]
+use libfuzzer_sys::fuzz_target;
+
+fuzz_target!(|data: &[u8]| {
+    if let Ok(s) = std::str::from_utf8(data) {
+        let _ = my_crate::parse(s);
+    }
+});
+```
+
+```bash
+cargo +nightly fuzz run parse_input -- -max_total_time=300
+cargo +nightly fuzz tmin parse_input crash-*  # minimize crash
+```
+
+Convert minimized crash inputs into unit tests for regression.
+
+## Concurrency Testing with loom
+
+Exhaustive exploration of thread interleavings:
+
+```rust
+#[cfg(loom)]
+use loom::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+#[cfg(not(loom))]
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+#[cfg(loom)]
+#[test]
+fn test_concurrent_counter() {
+    loom::model(|| {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..2).map(|_| {
+            let counter = counter.clone();
+            loom::thread::spawn(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        }).collect();
+        for t in threads { t.join().expect("thread panicked"); }
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    });
+}
+```
+
+Run with: `RUSTFLAGS="--cfg loom" cargo test --release --lib`
+
+## Snapshot Testing with insta
+
+For complex outputs where manual expected values are error-prone:
+
+```rust
+use insta::assert_json_snapshot;
+
+#[test]
+fn test_api_response() {
+    let response = build_response();
+    assert_json_snapshot!(response, {
+        ".timestamp" => "[timestamp]",  // redact dynamic values
+        ".request_id" => "[uuid]",
+    });
+}
+```
+
+Review snapshots: `cargo insta review`
+
+## CLI Testing with assert_cmd
+
+```rust
+use assert_cmd::Command;
+use predicates::prelude::*;
+
+#[test]
+fn test_cli_success() {
+    Command::cargo_bin("my-tool")
+        .expect("binary not found")
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1.0"));
+}
+```
+
+## Integration Tests with testcontainers
+
+```rust
+use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
+
+#[tokio::test]
+async fn test_with_postgres() {
+    let container = GenericImage::new("postgres", "16-alpine")
+        .with_exposed_port(5432.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("ready to accept connections"))
+        .with_env_var("POSTGRES_PASSWORD", "test")
+        .start()
+        .await
+        .expect("failed to start container");
+
+    let port = container.get_host_port_ipv4(5432).await.expect("port");
+    let conn = format!("postgres://postgres:test@localhost:{port}/postgres");
+    // Use conn for integration testing...
+}
+```
+
+## Mocking with mockall
 
 ```rust
 use mockall::{automock, predicate::*};
@@ -190,7 +273,6 @@ use mockall::{automock, predicate::*};
 #[automock]
 trait Database {
     fn get(&self, key: &str) -> Option<String>;
-    fn set(&mut self, key: &str, value: &str) -> Result<(), Error>;
 }
 
 #[test]
@@ -206,52 +288,54 @@ fn test_with_mock_db() {
 }
 ```
 
-### Test Fixtures with rstest
+## Mutation Testing
 
-```rust
-use rstest::{rstest, fixture};
-
-#[fixture]
-fn test_db() -> Database {
-    Database::in_memory()
-}
-
-#[rstest]
-fn test_insert(test_db: Database) {
-    test_db.insert("key", "value");
-    assert_eq!(test_db.get("key"), Some("value"));
-}
-
-#[rstest]
-#[case("hello", 5)]
-#[case("", 0)]
-#[case("rust", 4)]
-fn test_length(#[case] input: &str, #[case] expected: usize) {
-    assert_eq!(input.len(), expected);
-}
-```
-
-## Verifying Test Quality
+Verify tests catch real bugs -- not just that they pass:
 
 ```bash
-cargo careful test                  # Run with extra UB checks
-cargo mutants                       # Mutation testing
-cargo tarpaulin --out html          # Coverage report
+cargo mutants                    # run all mutations
+cargo mutants -p my_crate       # specific crate
 ```
 
-Break the code intentionally, confirm a test fails, then fix. If no test fails, you have a gap.
+Surviving mutants = test coverage gaps.
+
+## Capturing tracing Output
+
+**`tracing-test`** -- when you need to **assert** on log content:
+
+```rust
+use tracing_test::traced_test;
+
+#[traced_test]
+#[test]
+fn test_logging() {
+    tracing::info!("processing request");
+    assert!(logs_contain("processing request"));
+}
+```
+
+**`test-log`** -- when you want **visibility** during debugging:
+
+```rust
+use test_log::test;
+
+#[test(tokio::test)]
+async fn async_test_with_logging() {
+    tracing::debug!("visible with RUST_LOG=debug");
+}
+```
 
 ## Common Commands
 
 ```bash
-cargo test                          # Run all tests
-cargo test test_name                # Run specific test
-cargo test --lib                    # Only lib tests
-cargo test --doc                    # Only doc tests
-cargo test -- --nocapture           # Show println!/tracing output
-cargo test -- --test-threads=1      # Sequential execution
+cargo nextest run                   # Run all tests (recommended)
+cargo nextest run test_name         # Run specific test
+cargo nextest run --profile ci      # CI profile (retries, no fail-fast)
+cargo test --doc                    # Doc tests (nextest doesn't support these)
+cargo test -- --nocapture           # Show output
+cargo +nightly miri test            # UB detection
+cargo +nightly careful test         # Extra runtime checks
 RUST_BACKTRACE=1 cargo test         # With backtraces
-cargo nextest run                   # Faster parallel runner
 ```
 
 ## Common Mistakes
@@ -260,22 +344,27 @@ cargo nextest run                   # Faster parallel runner
 |---------|-------|-----|
 | Testing private functions | Brittle tests | Test public API |
 | Hardcoded paths | Fails on other machines | Use `tempfile` crate |
-| Sleep in async tests | Flaky, slow | Use channels/notify/timeout |
+| Sleep in async tests | Flaky, slow | Use `start_paused` / channels / timeout |
 | No error case tests | Miss failure modes | Test both Ok and Err |
 | Giant test functions | Hard to debug | One assertion focus per test |
 | Shared mutable state | Test pollution | Use fixtures, isolate state |
-| Tests pass but don't catch bugs | False confidence | Mutation testing |
+| Tests pass but miss bugs | False confidence | Mutation testing, property testing |
+| `current_thread` runtime for spawned tasks | Tasks don't progress | Use `multi_thread` flavor |
 
 ## Essential Crates
 
-- `proptest` - Property-based testing
-- `cargo-mutants` - Mutation testing
-- `mockall` - Mock generation
-- `rstest` - Fixtures and parametrized tests
-- `insta` - Snapshot testing
-- `tempfile` - Temporary files/directories
-- `wiremock` - HTTP mocking
-- `approx` - Floating-point comparisons
-- `test-log` - Capture tracing in tests
-- `cargo-nextest` - Faster test runner
-- `cargo-tarpaulin` - Code coverage
+- `cargo-nextest` -- Process-per-test runner (faster, isolated)
+- `proptest` -- Property-based testing with automatic shrinking
+- `cargo-mutants` -- Mutation testing
+- `cargo-fuzz` -- Fuzz testing (nightly)
+- `loom` -- Exhaustive concurrency testing
+- `mockall` -- Mock generation
+- `rstest` -- Fixtures and parametrized tests
+- `insta` -- Snapshot testing
+- `assert_cmd` -- CLI testing
+- `testcontainers` -- Docker-based integration tests
+- `tracing-test` -- Assert on log output
+- `test-log` -- See logs during test failures
+- `tempfile` -- Temporary files/directories
+- `wiremock` -- HTTP mocking
+- `approx` -- Floating-point comparisons

@@ -37,48 +37,51 @@ Write Rust that leverages the language's strengths: ownership, pattern matching,
 | `raw_input` / `parsed_input` | Shadow: `let input = parse(input);` |
 | `u64` for domain IDs | Newtype: `struct UserId(u64)` |
 | `println!("debug: {x}")` | `tracing::debug!("{x}")` |
-| Iterator chain with `.filter().map().collect()` | `for` loop with mutable accumulator |
+| `#[allow(lint)]` | `#[expect(lint, reason = "...")]` |
+
+## API Naming Conventions
+
+Follow the Rust API Guidelines for method prefixes:
+
+| Prefix | Cost | Ownership | Example |
+|--------|------|-----------|---------|
+| `as_` | Free | Borrowed -> Borrowed | `as_str()`, `as_bytes()` |
+| `to_` | Expensive | Borrowed -> Owned | `to_string()`, `to_vec()` |
+| `into_` | Variable | Owned -> Owned (consumes) | `into_inner()`, `into_vec()` |
+
+**Getters:** no `get_` prefix for simple field access. Reserve `get_` for lookups with parameters (like `HashMap::get`).
+
+**Iterators:** `iter()` -> `&T`, `iter_mut()` -> `&mut T`, `into_iter()` -> `T`
 
 ## Core Patterns
 
-### For Loops Over Iterator Chains
+### For Loops vs Iterator Chains
+
+Short, simple transforms (1-2 combinators) are fine as iterators. **Prefer `for` loops when the chain exceeds two combinators or involves side effects:**
 
 ```rust
-// NON-IDIOMATIC (per project convention): long iterator chain
-let result: Vec<_> = items
-    .iter()
-    .filter(|item| item.is_valid())
-    .map(|item| item.transform())
+// Fine as iterator: simple, two combinators
+let valid_names: Vec<_> = users.iter()
+    .filter(|u| u.is_active())
+    .map(|u| &u.name)
     .collect();
 
-// IDIOMATIC: for loop with mutable accumulator
-let mut result = Vec::new();
+// Better as for loop: complex logic, side effects, or 3+ combinators
+let mut results = Vec::new();
 for item in &items {
-    if item.is_valid() {
-        result.push(item.transform());
+    if !item.is_valid() {
+        continue;
+    }
+    let transformed = item.transform()?;
+    if transformed.meets_criteria() {
+        results.push(transformed);
     }
 }
 ```
 
-Short, simple transforms (single `.map()` or `.filter()`) are fine as iterators. Prefer `for` loops when the chain exceeds two combinators or involves side effects.
-
 ### let...else for Early Returns
 
 ```rust
-// NON-IDIOMATIC: nested if-let
-fn process(input: Option<&str>) -> Result<Output, Error> {
-    if let Some(value) = input {
-        if let Ok(parsed) = value.parse::<u64>() {
-            do_work(parsed)
-        } else {
-            Err(Error::InvalidNumber)
-        }
-    } else {
-        Err(Error::MissingInput)
-    }
-}
-
-// IDIOMATIC: let...else keeps happy path unindented
 fn process(input: Option<&str>) -> Result<Output, Error> {
     let Some(value) = input else {
         return Err(Error::MissingInput);
@@ -93,11 +96,6 @@ fn process(input: Option<&str>) -> Result<Output, Error> {
 ### Newtypes Over Primitives
 
 ```rust
-// NON-IDIOMATIC: bare primitives lose meaning
-fn transfer(from: u64, to: u64, amount: u64) { }
-transfer(amount, user_id, account_id);  // Compiles! Args swapped.
-
-// IDIOMATIC: newtypes prevent mixups at compile time
 struct UserId(u64);
 struct AccountId(u64);
 struct Amount(u64);
@@ -109,12 +107,6 @@ fn transfer(from: AccountId, to: AccountId, amount: Amount) { }
 ### Shadow Variables Through Transformations
 
 ```rust
-// NON-IDIOMATIC: prefixed names
-let raw_input = get_input();
-let trimmed_input = raw_input.trim();
-let parsed_input: Config = toml::from_str(trimmed_input)?;
-
-// IDIOMATIC: shadow through transformations
 let input = get_input();
 let input = input.trim();
 let input: Config = toml::from_str(input)?;
@@ -125,39 +117,19 @@ let input: Config = toml::from_str(input)?;
 ```rust
 enum Command { Start, Stop, Pause, Resume }
 
-// NON-IDIOMATIC: wildcard hides new variants
-match cmd {
-    Command::Start => start(),
-    _ => {}  // Adding Command::Resume won't warn
-}
-
-// IDIOMATIC: name every variant
+// Name every variant -- adding Resume will produce a compile error
 match cmd {
     Command::Start => start(),
     Command::Stop | Command::Pause | Command::Resume => {}
-}
-
-// NON-IDIOMATIC: matches! macro hides variant changes
-if matches!(cmd, Command::Start | Command::Stop) { handle(); }
-
-// IDIOMATIC: explicit match
-match cmd {
-    Command::Start | Command::Stop => handle(),
-    Command::Pause | Command::Resume => {}
 }
 ```
 
 ### Enums for State Machines
 
 ```rust
-// NON-IDIOMATIC: boolean flags
-struct Connection {
-    is_connected: bool,
-    is_authenticated: bool,
-    error_message: Option<String>,
-}
+// NOT: bool flags
+// struct Connection { is_connected: bool, is_authenticated: bool }
 
-// IDIOMATIC: enum with data in variants
 enum ConnectionState {
     Disconnected,
     Connected,
@@ -166,16 +138,69 @@ enum ConnectionState {
 }
 ```
 
+### `#[non_exhaustive]` on Public Enums/Structs
+
+```rust
+// Library code: prevents downstream from exhaustive matching
+// Allows adding variants without breaking change
+#[non_exhaustive]
+pub enum Error {
+    NotFound,
+    PermissionDenied,
+}
+```
+
+### Function Parameter Types
+
+```rust
+fn process(items: &[String]) { }   // Not &Vec<String>
+fn greet(name: &str) { }           // Not &String
+
+// For ownership transfer
+fn store(name: impl Into<String>) {
+    let name: String = name.into();
+}
+```
+
+### Cow for Maybe-Clone
+
+```rust
+use std::borrow::Cow;
+
+fn normalize(input: &str) -> Cow<str> {
+    if input.contains('\t') {
+        Cow::Owned(input.replace('\t', "    "))
+    } else {
+        Cow::Borrowed(input)  // no allocation
+    }
+}
+```
+
+### `#[expect]` Over `#[allow]` (Rust 1.81+)
+
+```rust
+// BAD: #[allow] silently persists even when the warning is fixed
+#[allow(clippy::cast_possible_truncation)]
+let x = big_value as u16;
+
+// GOOD: #[expect] warns when the suppressed lint no longer fires
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "value validated to fit in u16 above"
+)]
+let x = big_value as u16;
+```
+
 ### Ownership and Borrowing
 
 ```rust
-// NON-IDIOMATIC: unnecessary cloning
+// NOT: unnecessary cloning
 fn process(data: &Data) -> String {
     let owned = data.clone();
     owned.name.clone()
 }
 
-// IDIOMATIC: borrow what you need
+// Borrow what you need
 fn process(data: &Data) -> &str {
     &data.name
 }
@@ -184,16 +209,6 @@ fn process(data: &Data) -> &str {
 ### Error Propagation
 
 ```rust
-// NON-IDIOMATIC: manual match
-fn read_config() -> Result<Config, Error> {
-    let content = match std::fs::read_to_string("config.toml") {
-        Ok(c) => c,
-        Err(e) => return Err(e.into()),
-    };
-    Ok(toml::from_str(&content)?)
-}
-
-// IDIOMATIC: ? operator
 fn read_config() -> Result<Config, Error> {
     let content = std::fs::read_to_string("config.toml")?;
     let config = toml::from_str(&content)?;
@@ -201,59 +216,88 @@ fn read_config() -> Result<Config, Error> {
 }
 ```
 
-### Option/Result Combinators
-
-```rust
-let value = opt.unwrap_or(0);
-let value = opt.unwrap_or_else(|| expensive_default());
-let value = opt.unwrap_or_default();
-let value = opt.ok_or(Error::Missing)?;
-let doubled = opt.map(|x| x * 2);
-let result = opt.and_then(|x| validate(x));
-```
-
-### Function Parameter Types
-
-```rust
-// NON-IDIOMATIC: overly specific
-fn process(items: &Vec<String>) { }
-fn greet(name: &String) { }
-
-// IDIOMATIC: accept slices
-fn process(items: &[String]) { }   // Accepts Vec, array, slice
-fn greet(name: &str) { }           // Accepts String, &str, Cow<str>
-
-// For ownership transfer
-fn store(name: impl Into<String>) {
-    let name: String = name.into();
-}
-```
-
 ### Logging with tracing
 
 ```rust
-// NON-IDIOMATIC
-println!("Processing user {user_id}");
-eprintln!("Error: {err}");
-
-// IDIOMATIC
 tracing::info!(user_id, "processing user");
 tracing::error!(?err, "operation failed");
 tracing::debug!(shard_count = shards.len(), "distribution complete");
+```
+
+## Type System Patterns
+
+### Typestate Pattern
+
+Encode state machines in the type system for compile-time validation:
+
+```rust
+pub struct Draft;
+pub struct Published;
+
+pub struct Article<State> {
+    title: String,
+    _state: PhantomData<State>,
+}
+
+impl Article<Draft> {
+    pub fn publish(self) -> Article<Published> {
+        Article { title: self.title, _state: PhantomData }
+    }
+}
+
+impl Article<Published> {
+    pub fn url(&self) -> String { format!("/articles/{}", self.title) }
+}
+// article.url() only compiles on Published articles
+```
+
+### Sealed Traits
+
+Prevent downstream implementations, allowing you to add methods without breaking changes:
+
+```rust
+mod sealed { pub trait Sealed {} }
+
+pub trait Driver: sealed::Sealed {
+    fn connect(&self) -> Connection;
+}
+```
+
+### Extension Traits
+
+Add methods to foreign types:
+
+```rust
+pub trait IteratorExt: Iterator {
+    fn find_with_index<P>(&mut self, pred: P) -> Option<(usize, Self::Item)>
+    where P: FnMut(&Self::Item) -> bool, Self: Sized;
+}
+
+impl<I: Iterator> IteratorExt for I { /* ... */ }
+```
+
+### Visibility Design
+
+```rust
+pub struct Config { /* ... */ }        // External API
+pub(crate) fn validate() { /* ... */ } // Crate-internal
+// Default: private. Only pub(crate) when another module needs it.
+// Only pub when external consumers need it.
 ```
 
 ## Common Mistakes
 
 | Mistake | Issue | Fix |
 |---------|-------|-----|
-| `to_string()` on `&str` param | Unnecessary allocation | Accept `impl AsRef<str>` |
+| `to_string()` on `&str` param | Unnecessary allocation | Accept `&str` directly |
 | `Box<dyn Trait>` everywhere | Runtime cost | Use generics `impl Trait` |
 | `Arc<Mutex<_>>` by default | Overhead | `Rc<RefCell<_>>` if single-threaded |
 | Manual `Drop` impl | Usually wrong | Let compiler handle it |
 | `pub` on everything | Leaky API | Start private, expose as needed |
 | `matches!` macro | Misses new fields/variants | Explicit destructuring |
 | Wildcard `_` in match | Misses new variants | Name all variants |
-| Long iterator chains | Hard to read/debug | `for` loop with accumulator |
+| `#[allow]` without reason | Stale suppressions | Use `#[expect(lint, reason = "...")]` |
+| `Deref` as inheritance | Confusing method resolution | Explicit delegation |
 
 ## Clippy Alignment
 
@@ -268,4 +312,7 @@ clippy::ptr_arg
 clippy::print_stdout
 clippy::print_stderr
 clippy::dbg_macro
+clippy::allow_attributes          (forces #[expect] over #[allow])
+clippy::uninlined_format_args
+clippy::needless_pass_by_value
 ```

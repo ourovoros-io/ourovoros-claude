@@ -24,30 +24,131 @@ Review unsafe Rust code for soundness. Unsafe blocks must uphold invariants the 
 
 | Unsafe Operation | Risk | Required Invariant |
 |------------------|------|-------------------|
-| Raw pointer deref | UB, crash | Non-null, aligned, valid |
-| `transmute` | UB, memory corruption | Same size, valid repr |
-| FFI call | UB, crash | Correct signature, valid args |
+| Raw pointer deref | UB, crash | Non-null, aligned, valid, no aliasing violations |
+| `transmute` | UB, memory corruption | Same size, valid repr, all bit patterns valid |
+| FFI call | UB, crash | Correct signature, valid args, exception safety |
 | Mutable aliasing | UB | No other refs exist |
 | `Send`/`Sync` impl | Data races | Type is actually thread-safe |
+| `static mut` | Data races | Use `OnceLock`, atomics, or `Mutex` instead |
+| Union field access | UB | Active field matches access |
 
 ## Audit Checklist
 
 For every `unsafe` block:
 
-1. **Identify the unsafe operation** - What specifically requires unsafe?
-2. **Document invariants** - What must be true for this to be sound?
-3. **Verify invariants** - How do you know they hold?
-4. **Minimize scope** - Is all code inside necessary?
-5. **Test edge cases** - What happens at boundaries?
+1. **Identify the unsafe operation** -- What specifically requires unsafe?
+2. **Document invariants** -- What must be true for this to be sound?
+3. **Verify invariants** -- How do you know they hold?
+4. **Minimize scope** -- Is all code inside necessary?
+5. **Exception safety** -- What if code panics mid-operation?
+6. **Test edge cases** -- What happens at boundaries?
 
-## Common Patterns
+## Safety Documentation Format
 
-### Raw Pointer Handling
+```rust
+// SAFETY: [Why this is sound]
+// - Invariant 1: [how it's upheld]
+// - Invariant 2: [how it's upheld]
+unsafe {
+    // minimal unsafe code
+}
+```
+
+For `pub unsafe fn`, document caller requirements in a `# Safety` doc section:
+
+```rust
+/// # Safety
+///
+/// - `ptr` must be non-null and properly aligned for `T`
+/// - `ptr` must point to a valid, initialized value of `T`
+/// - No mutable references to this memory may exist
+pub unsafe fn deref_raw<T>(ptr: *const T) -> &T {
+    unsafe { &*ptr }
+}
+```
+
+## Edition 2024: `unsafe_op_in_unsafe_fn`
+
+In Edition 2024, the body of an `unsafe fn` no longer implicitly allows unsafe operations:
+
+```rust
+// Edition 2024: must use unsafe blocks inside unsafe fn
+unsafe fn read_raw(ptr: *const u8, len: usize) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(ptr, len) }
+}
+```
+
+## Variance and PhantomData
+
+Variance determines how subtyping of generics affects the container. Getting this wrong causes UB.
+
+| Type | Over `T` |
+|------|----------|
+| `&T`, `Box<T>`, `Vec<T>`, `*const T` | Covariant |
+| `&mut T`, `*mut T`, `UnsafeCell<T>` | Invariant |
+| `fn(T) -> U` | Contravariant in T, covariant in U |
+
+**PhantomData tells the compiler about ownership and variance:**
+
+| Pattern | Variance | Use when |
+|---------|----------|----------|
+| `PhantomData<T>` | Covariant, owns T | Custom allocator holding `*mut T` |
+| `PhantomData<&'a T>` | Covariant | Borrowing T for lifetime 'a |
+| `PhantomData<&'a mut T>` | Invariant | Mutable borrow for 'a |
+| `PhantomData<*const T>` | Covariant, !Send !Sync | Raw pointer semantics |
+| `PhantomData<*mut T>` | Invariant, !Send !Sync | Mutable raw pointer |
+| `PhantomData<fn(T)>` | Contravariant, Send+Sync | Type parameter without ownership |
+
+```rust
+use std::marker::PhantomData;
+
+struct Slice<'a, T> {
+    ptr: *const T,
+    len: usize,
+    _marker: PhantomData<&'a T>,  // borrows T for 'a, covariant
+}
+```
+
+## Exception Safety (Panic Safety)
+
+Unsafe code must handle panics. If code panics between setting up invariants and completing the operation, the type may be left in an invalid state.
+
+```rust
+// BAD: panic in clone() leaves Vec with uninitialized elements
+impl<T: Clone> Vec<T> {
+    fn push_all(&mut self, to_push: &[T]) {
+        self.reserve(to_push.len());
+        unsafe {
+            self.set_len(self.len() + to_push.len()); // len set BEFORE init
+            for (i, x) in to_push.iter().enumerate() {
+                self.ptr().add(i).write(x.clone()); // panic here = UB
+            }
+        }
+    }
+}
+```
+
+**Fix: destructor guard pattern** -- a struct whose Drop restores invariants on panic:
+
+```rust
+struct SetLenOnDrop<'a, T> {
+    vec: &'a mut Vec<T>,
+    len: usize,
+}
+impl<T> Drop for SetLenOnDrop<'_, T> {
+    fn drop(&mut self) {
+        // Only set len to actually-initialized count
+        unsafe { self.vec.set_len(self.len); }
+    }
+}
+```
+
+## Raw Pointer Handling
 
 ```rust
 // BAD: No validation
 unsafe fn get_value(ptr: *const i32) -> i32 {
-    *ptr  // Could be null, misaligned, or dangling
+    *ptr
 }
 
 // GOOD: Validate before deref
@@ -56,17 +157,17 @@ fn get_value(ptr: *const i32) -> Option<i32> {
         return None;
     }
     // SAFETY: Pointer is non-null. Caller must ensure:
-    // - Pointer is properly aligned for i32
-    // - Pointer points to initialized i32
+    // - Properly aligned for i32
+    // - Points to initialized i32
     // - No mutable references to this memory exist
     Some(unsafe { *ptr })
 }
 ```
 
-### FFI Boundaries
+## FFI Boundaries
 
 ```rust
-extern "C" {
+unsafe extern "C" {
     fn process_data(
         input: *const c_char,
         len: size_t,
@@ -103,7 +204,7 @@ pub fn process(input: &str) -> Result<String, Error> {
 }
 ```
 
-### Implementing Unsafe Traits
+## Implementing Unsafe Traits
 
 ```rust
 struct MyWrapper {
@@ -123,20 +224,18 @@ unsafe impl Send for MyWrapper {}
 unsafe impl Sync for MyWrapper {}
 ```
 
-### Transmute Alternatives
+## Transmute Alternatives
 
 ```rust
 // BAD: transmute is a code smell
 let bytes: [u8; 4] = unsafe { std::mem::transmute(value) };
 
 // GOOD: Use safe alternatives
-let bytes = value.to_ne_bytes();   // For integers
-let bytes = value.to_le_bytes();   // Explicit endianness
-
-// For slices
+let bytes = value.to_ne_bytes();
+let bytes = value.to_le_bytes();
 let byte_slice: &[u8] = bytemuck::bytes_of(&value);
 
-// If transmute truly needed, document thoroughly:
+// If transmute truly needed:
 // SAFETY: Both types have identical memory layout because:
 // - Same size (verified by static assert)
 // - Same alignment (repr(C) on both)
@@ -149,48 +248,38 @@ let target: Target = unsafe { std::mem::transmute(source) };
 
 | Pattern | Risk | Fix |
 |---------|------|-----|
-| `unsafe` without comment | Unknown invariants | Document SAFETY |
+| `unsafe` without `// SAFETY:` | Unknown invariants | Document safety |
 | Large unsafe blocks | Hard to audit | Minimize scope |
 | `transmute` | Usually wrong | Use safe conversions |
 | `as *mut` casts | Aliasing violations | Review carefully |
 | `static mut` | Data races | Use `OnceLock`, atomics |
 | `MaybeUninit` | Uninitialized reads | Ensure init before use |
-
-## Safety Documentation Format
-
-```rust
-// SAFETY: [Why this is sound]
-// - Invariant 1: [how it's upheld]
-// - Invariant 2: [how it's upheld]
-// Caller requirements (if pub unsafe fn):
-// - Requirement 1
-// - Requirement 2
-unsafe {
-    // minimal unsafe code
-}
-```
-
-## Common Mistakes
-
-| Mistake | Issue | Fix |
-|---------|-------|-----|
-| No safety comment | Can't audit | Always document |
-| Wrong pointer lifetime | Use after free | Tie to borrow |
-| Aliasing `&mut` | Instant UB | Use `UnsafeCell` |
-| Unaligned access | UB on some platforms | Use `read_unaligned` |
-| Forgetting drop | Memory leak | `ManuallyDrop` or explicit |
-| `#[repr(Rust)]` transmute | Layout not guaranteed | Use `#[repr(C)]` |
+| No panic consideration | Invariant violation on unwind | Destructor guard pattern |
+| Wrong `PhantomData` | Unsound variance/lifetime | Match ownership semantics |
 
 ## Tools for Unsafe Auditing
 
 ```bash
-cargo miri test              # Detects UB at runtime
-cargo careful test           # Extra runtime checks (stdlib debug assertions)
-cargo +nightly -Z sanitizer=address test  # Memory errors
-cargo geiger                 # Count unsafe in dependencies
+# UB detection at runtime (best tool for unsafe audit)
+cargo +nightly miri test
+# Explore thread interleavings:
+MIRIFLAGS="-Zmiri-many-seeds=100" cargo +nightly miri test
+# Use Tree Borrows model:
+MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test
+
+# Extra runtime checks (faster than miri, less thorough)
+cargo +nightly careful test
+
+# Sanitizers (nightly, catches issues miri misses in FFI)
+RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
+RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
+
+# Count unsafe in dependencies
+cargo geiger
 ```
 
-Enable the clippy lint to enforce documentation:
-```
-clippy::undocumented_unsafe_blocks
-```
+**Miri catches:** aliasing violations (Stacked/Tree Borrows), use-after-free, uninitialized reads, misaligned access, invalid values, data races.
+
+**Miri does NOT catch:** FFI/C code bugs, layout-dependent code, exhaustive exploration (only one execution path per run).
+
+Enable the clippy lint: `clippy::undocumented_unsafe_blocks`
