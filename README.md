@@ -17,7 +17,23 @@ rust-development (hub)          ← Loads for all Rust work
     ├── rust-performance        ← Benchmarks, profiling
     ├── rust-dependency-audit   ← cargo audit, licenses
     ├── rust-code-clarity       ← Refactoring, naming
-    └── rust-idiomatic-patterns ← Full idioms reference
+    ├── rust-idiomatic-patterns ← Full idioms reference
+    └── rust-nomicon            ← Unsafe Rust mastery
+
+rfr-* (Rust for Rustaceans)     ← Deep-dive reference skills
+    │
+    ├── rfr-foundations         ← Ownership, lifetimes, drop order
+    ├── rfr-types               ← Layout, alignment, traits, Sized
+    ├── rfr-designing-interfaces ← API design, signatures, builders
+    ├── rfr-error-handling      ← Error types, thiserror/anyhow
+    ├── rfr-project-structure   ← Crates, modules, workspaces
+    ├── rfr-testing             ← Tests, proptest, fuzzing, Miri
+    ├── rfr-macros              ← macro_rules!, proc macros, syn/quote
+    ├── rfr-async-programming   ← Futures, Pin, Waker, async/await
+    ├── rfr-unsafe-code         ← Raw pointers, MaybeUninit, soundness
+    ├── rfr-concurrency         ← Send/Sync, atomics, deadlocks
+    ├── rfr-ffi                 ← extern "C", bindgen, repr(C)
+    └── rfr-ecosystem           ← Type state, newtype, RAII patterns
 ```
 
 ### How It Works
@@ -70,6 +86,7 @@ ln -s $(pwd)/skills/* ~/.claude/skills/
 |-------|-------------|
 | `rust-security-audit` | User input, auth, secrets, crypto, injection |
 | `rust-unsafe-audit` | Reviewing unsafe blocks, FFI, raw pointers |
+| `rust-nomicon` | Unsafe Rust mastery, variance, drop check, UB prevention |
 | `rust-dependency-audit` | cargo audit, licenses, supply chain |
 
 #### Development Workflows
@@ -78,6 +95,25 @@ ln -s $(pwd)/skills/* ~/.claude/skills/
 | `rust-testing` | TDD, proptest, mocking, async tests |
 | `rust-async-patterns` | Tokio, spawn, channels, deadlocks |
 | `rust-performance` | Profiling, benchmarks, optimization |
+
+### Rust for Rustaceans Skills (Deep-Dive Reference)
+
+Based on the book *Rust for Rustaceans*. Load these for in-depth coverage of specific Rust topics.
+
+| Skill | When to Use |
+|-------|-------------|
+| `rfr-foundations` | Ownership, borrowing, lifetimes, drop order, interior mutability |
+| `rfr-types` | Type layout, alignment, `Sized`, traits, `PhantomData`, marker traits |
+| `rfr-designing-interfaces` | Public API design, function signatures, standard traits, builders |
+| `rfr-error-handling` | Error types, `thiserror`/`anyhow`, `Display`, `?` operator, when to panic |
+| `rfr-project-structure` | Crates, modules, workspaces, features, conditional compilation |
+| `rfr-testing` | Unit/integration/doc tests, proptest, fuzzing, Miri, benchmarks |
+| `rfr-macros` | `macro_rules!`, procedural macros, `syn`/`quote`, hygiene |
+| `rfr-async-programming` | Futures, `Pin`, `Waker`, async/await, spawn, `select!`, cancellation |
+| `rfr-unsafe-code` | unsafe blocks, raw pointers, `MaybeUninit`, `UnsafeCell`, soundness |
+| `rfr-concurrency` | `Send`/`Sync`, `Mutex`, channels, atomics, ordering, deadlock prevention |
+| `rfr-ffi` | `extern "C"`, `CStr`/`CString`, `repr(C)`, bindgen/cbindgen |
+| `rfr-ecosystem` | Type state, newtype, extension traits, RAII, iterator patterns |
 
 ## Usage Examples
 
@@ -186,6 +222,21 @@ Systematic optimization:
 - Data structure selection
 - Release profile tuning
 
+### rust-nomicon
+
+Unsafe Rust mastery (Rustonomicon reference):
+- Safe/unsafe contract and all causes of UB
+- Data layout (`repr(C)`, `repr(transparent)`, ZSTs, DSTs)
+- Subtyping, variance, and `PhantomData`
+- Drop check and `#[may_dangle]`
+- Type conversions (`as`, `transmute`, coercions)
+- Uninitialized memory and `MaybeUninit`
+- OBRM (constructors, destructors, leaking)
+- Exception safety (guard pattern, poisoning)
+- Concurrency (`Send`/`Sync`, atomics, orderings)
+- FFI (extern functions, opaque types, callbacks)
+- `#![no_std]` essentials
+
 ### rust-dependency-audit
 
 Supply chain security:
@@ -194,6 +245,107 @@ Supply chain security:
 - cargo vet
 - License compliance
 - Dependency evaluation
+
+### rfr-foundations
+
+Ownership, borrowing, and lifetime mechanics:
+- Memory model and ownership semantics
+- Borrowing rules and lifetime annotations
+- Drop order and `ManuallyDrop`
+- Interior mutability (`Cell`, `RefCell`, `UnsafeCell`)
+
+### rfr-types
+
+Type system deep dive:
+- Type layout and alignment
+- `Sized` and dynamically sized types
+- Trait objects and vtables
+- `PhantomData` and marker traits
+
+### rfr-designing-interfaces
+
+Public API design patterns:
+- Function signatures and parameter types
+- Standard trait implementations
+- Builder pattern
+- Sealed traits and extension traits
+
+### rfr-error-handling (rfr)
+
+Error design in depth:
+- `thiserror` for libraries, `anyhow` for applications
+- `Display` and `Error` trait implementations
+- `?` operator and error conversion
+- When to panic vs return errors
+
+### rfr-project-structure
+
+Crate and module organization:
+- Workspace layout and dependencies
+- Feature flags and conditional compilation
+- Module visibility and re-exports
+- Documentation and `cfg` attributes
+
+### rfr-testing (rfr)
+
+Testing strategies:
+- Unit, integration, and doc tests
+- Property-based testing with proptest
+- Fuzzing with cargo-fuzz
+- Miri for UB detection
+- Benchmarking with criterion
+
+### rfr-macros
+
+Macro development:
+- `macro_rules!` patterns and pitfalls
+- Procedural macros (derive, attribute, function-like)
+- `syn` and `quote` for proc macros
+- Hygiene and `cargo expand`
+
+### rfr-async-programming
+
+Async internals:
+- `Future` trait and `Pin`/`Unpin`
+- `Waker` mechanics
+- async/await desugaring
+- `spawn`, `select!`, `join!`
+- Cancellation safety
+
+### rfr-unsafe-code
+
+Unsafe Rust correctness:
+- Raw pointer safety invariants
+- `MaybeUninit` and uninitialized memory
+- `UnsafeCell` and interior mutability
+- Soundness proofs and documentation
+
+### rfr-concurrency
+
+Concurrent programming:
+- `Send` and `Sync` traits
+- `Mutex`, `RwLock`, and poisoning
+- Channel patterns (mpsc, crossbeam)
+- Atomic operations and memory ordering
+- Deadlock prevention strategies
+
+### rfr-ffi
+
+Foreign function interface:
+- `extern "C"` declarations and ABI
+- `CStr`/`CString` string handling
+- `repr(C)` layout guarantees
+- bindgen and cbindgen tooling
+- Panic safety across FFI boundaries
+
+### rfr-ecosystem
+
+Design patterns and crate ecosystem:
+- Type state pattern
+- Newtype pattern
+- Extension traits
+- RAII and resource management
+- Iterator protocol and custom iterators
 
 ## Contributing
 
