@@ -18,6 +18,7 @@ Review Rust code for application-level security vulnerabilities. Focus on data v
 - Network request/response handling
 - Database queries with dynamic input
 - File operations with user-provided paths
+- Adding or reviewing dependencies
 
 **Not for:** Low-level unsafe/FFI review (use `rust-unsafe-audit`), general code quality (use `rust-idiomatic-patterns`)
 
@@ -29,17 +30,37 @@ Review Rust code for application-level security vulnerabilities. Focus on data v
 | Secret exposure | Hardcoded credentials | Env vars, `secrecy` crate |
 | Path traversal | User input in file paths | Canonicalize, validate against allowlist |
 | Integer overflow | Unchecked arithmetic on input | `checked_add`, `saturating_mul` |
-| Timing attacks | Early return on auth failure | Constant-time comparison |
+| Timing attacks | Early return on auth failure | Constant-time comparison (`subtle`) |
 | Insecure random | `rand::thread_rng()` for crypto | `rand::rngs::OsRng` |
-| Weak password hash | SHA-256/MD5 for passwords | `argon2` or `bcrypt` with salt |
+| Weak password hash | SHA-256/MD5 for passwords | `argon2` with salt |
 | User enumeration | Different errors for not-found vs wrong-password | Same error message for both |
 | TOCTOU race | Check then use on file/resource | Atomic operations, lock-and-use |
 | Unbounded reads | Reading untrusted data without limit | `AsyncReadExt::take()`, size limits |
-| DoS via resource exhaustion | No rate limiting on endpoints | Semaphore, token bucket, governor |
+| DoS via exhaustion | No rate limiting on endpoints | Semaphore, token bucket, `governor` |
+| `build.rs` code execution | Malicious dependency build script | Audit `build.rs`, use `cargo vet` |
 
-## Security Patterns
+## Integer Overflow in Release Mode
 
-### Input Validation
+In debug mode, Rust panics on integer overflow. **In release mode, it wraps silently.** This is not UB but causes logic bugs:
+
+```rust
+// VULNERABLE: wraps to small number in release
+fn allocate_buffer(count: usize, item_size: usize) -> Vec<u8> {
+    let size = count * item_size;  // can wrap to small value
+    vec![0u8; size]  // too-small buffer
+}
+
+// SAFE: checked arithmetic
+fn allocate_buffer(count: usize, item_size: usize) -> Result<Vec<u8>, Error> {
+    let size = count.checked_mul(item_size)
+        .ok_or(Error::IntegerOverflow)?;
+    Ok(vec![0u8; size])
+}
+```
+
+For security-critical code, enable overflow checks in release: `[profile.release] overflow-checks = true`
+
+## Input Validation
 
 ```rust
 // BAD: Trust user input
@@ -60,13 +81,13 @@ fn process(input: &str) -> Result<(), Error> {
 }
 ```
 
-### TOCTOU (Time-of-Check-Time-of-Use)
+## TOCTOU (Time-of-Check-Time-of-Use)
 
 ```rust
 // BAD: Race between check and use
 fn write_if_missing(path: &Path, data: &[u8]) -> Result<(), Error> {
-    if !path.exists() {        // Check
-        std::fs::write(path, data)?;  // Use — file may now exist!
+    if !path.exists() {
+        std::fs::write(path, data)?;  // File may now exist!
     }
     Ok(())
 }
@@ -81,35 +102,11 @@ fn write_if_missing(path: &Path, data: &[u8]) -> Result<(), Error> {
     file.write_all(data)?;
     Ok(())
 }
-
-// GOOD: For async resources, lock then check
-async fn claim_slot(slots: &DashMap<u64, Claim>) -> Result<u64, Error> {
-    let slot_id = find_free_slot();
-    match slots.entry(slot_id) {
-        dashmap::mapref::entry::Entry::Vacant(e) => {
-            e.insert(Claim::new());
-            Ok(slot_id)
-        }
-        dashmap::mapref::entry::Entry::Occupied(_) => {
-            Err(Error::SlotTaken)
-        }
-    }
-}
 ```
 
-### Limiting Untrusted Reads
+## Limiting Untrusted Reads
 
 ```rust
-use tokio::io::AsyncReadExt;
-
-// BAD: Read unlimited data from untrusted source
-async fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;  // OOM if attacker sends GBs
-    Ok(buf)
-}
-
-// GOOD: Limit read size
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 async fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
@@ -126,60 +123,39 @@ async fn read_request(stream: &mut TcpStream) -> Result<Vec<u8>, Error> {
 }
 ```
 
-### Rate Limiting / DoS Prevention
+## Secrets Handling
 
 ```rust
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-
-struct Server {
-    request_semaphore: Arc<Semaphore>,  // Max concurrent requests
-}
-
-impl Server {
-    async fn handle(&self, req: Request) -> Result<Response, Error> {
-        let _permit = self.request_semaphore
-            .try_acquire()
-            .map_err(|_| Error::TooManyRequests)?;  // 429 immediately
-
-        process(req).await
-    }
-}
-
-// For per-client rate limiting, use governor crate:
-// use governor::{Quota, RateLimiter};
-// let limiter = RateLimiter::direct(Quota::per_second(nonzero!(50u32)));
-```
-
-### Secrets Handling
-
-```rust
-// BAD: Secrets in memory as plain String
-let api_key = std::env::var("API_KEY")?;
-
-// GOOD: Use secrecy crate — zeroized on drop, won't appear in Debug/Display
 use secrecy::{Secret, ExposeSecret};
+
+// Zeroized on drop, won't appear in Debug/Display
 let api_key: Secret<String> = Secret::new(std::env::var("API_KEY")?);
-// Only expose when needed:
 client.set_header("Authorization", api_key.expose_secret());
 ```
 
-### Constant-Time Comparison
+`secrecy` + `zeroize`: prevents accidental logging, clears memory on drop via `write_volatile`.
+
+**Limitation:** Moves, copies, and heap reallocations can leave residual copies. For defense-in-depth, consider `mlock(2)` to prevent swapping.
+
+## Constant-Time Comparison
 
 ```rust
-// BAD: Early return leaks timing info
+use subtle::ConstantTimeEq;
+
+// BAD: Short-circuits on first mismatch, leaks timing info
 fn verify_token(provided: &str, expected: &str) -> bool {
-    provided == expected  // Short-circuits on first mismatch
+    provided == expected
 }
 
-// GOOD: Constant-time comparison
-use subtle::ConstantTimeEq;
+// GOOD: Constant-time, no timing side channel
 fn verify_token(provided: &[u8], expected: &[u8]) -> bool {
     provided.ct_eq(expected).into()
 }
 ```
 
-### Password Hashing
+**Always verify in release mode** -- debug builds may contain secret-dependent branches from debug assertions.
+
+## Password Hashing
 
 ```rust
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
@@ -191,28 +167,12 @@ fn hash_password(password: &str) -> Result<String, Error> {
     let argon2 = Argon2::default();
     Ok(argon2.hash_password(password.as_bytes(), &salt)?.to_string())
 }
-
-fn verify_password(password: &str, hash: &str) -> Result<bool, Error> {
-    let parsed_hash = PasswordHash::new(hash)?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed_hash)
-        .is_ok())
-}
 ```
 
-### Authentication Errors
+## Authentication Errors
 
 ```rust
-// BAD: Leaks whether user exists
-fn login(username: &str, password: &str) -> Result<User, Error> {
-    let user = db::find_user(username)
-        .ok_or(Error::UserNotFound)?;        // Reveals existence
-    verify_password(password, &user.hash)
-        .map_err(|_| Error::WrongPassword)?;  // Different error
-    Ok(user)
-}
-
-// GOOD: Same error for both cases
+// GOOD: Same error for user-not-found and wrong-password
 fn login(username: &str, password: &str) -> Result<User, Error> {
     let user = db::find_user(username);
     let valid = user
@@ -223,7 +183,59 @@ fn login(username: &str, password: &str) -> Result<User, Error> {
     if valid {
         Ok(user.expect("verified above"))
     } else {
-        Err(Error::InvalidCredentials)  // Same error for both
+        Err(Error::InvalidCredentials)
+    }
+}
+```
+
+## `build.rs` as Attack Surface
+
+Build scripts execute with full privileges during `cargo build` and `cargo check`. They can:
+- Read/write arbitrary files (SSH keys, credentials)
+- Execute programs, make network requests
+- Access all environment variables
+
+**Mitigations:**
+1. Audit `build.rs` in every dependency (use `cargo vet`)
+2. Prefer crates without `build.rs` when alternatives exist
+3. Build in sandboxed environments (containers)
+4. Use `cargo-deny` sources check to restrict to known registries
+
+## Capability Design
+
+```rust
+// BAD: Ambient authority -- function reaches into environment
+fn process_request(req: &Request) {
+    let db = Database::connect_from_env();
+}
+
+// GOOD: Explicit capability passing
+fn process_request(req: &Request, db: &Database) {
+    // Can only access what was explicitly given
+}
+
+// GOOD: Separate traits per capability
+trait StorageRead { fn read(&self, key: &str) -> Vec<u8>; }
+trait StorageWrite { fn write(&mut self, key: &str, val: &[u8]); }
+// Don't give write capability to code that only needs read
+```
+
+## Rate Limiting / DoS Prevention
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+struct Server {
+    request_semaphore: Arc<Semaphore>,
+}
+
+impl Server {
+    async fn handle(&self, req: Request) -> Result<Response, Error> {
+        let _permit = self.request_semaphore
+            .try_acquire()
+            .map_err(|_| Error::TooManyRequests)?;
+        process(req).await
     }
 }
 ```
@@ -232,32 +244,24 @@ fn login(username: &str, password: &str) -> Result<User, Error> {
 
 1. **Inputs**: All external data validated before use
 2. **Size limits**: Untrusted reads bounded (`take()`, max sizes)
-3. **TOCTOU**: No check-then-use races on shared resources
-4. **Secrets**: No hardcoded credentials, proper zeroization
-5. **Crypto**: Using audited crates (ring, rustcrypto), proper RNG
-6. **Errors**: No sensitive data in error messages
-7. **Logging**: No secrets logged, PII redacted
-8. **Rate limits**: Endpoints protected against resource exhaustion
-9. **Dependencies**: Security advisories checked (`cargo audit`)
-
-## Common Mistakes
-
-| Mistake | Why It's Bad | Fix |
-|---------|--------------|-----|
-| `unwrap()` on user input | DoS via panic | Return error, validate first |
-| SQL string formatting | Injection | Query builder, parameterize |
-| Logging request bodies | Credential leak | Redact sensitive fields |
-| `Default` for secrets | Predictable values | Require explicit initialization |
-| Ignoring `#[must_use]` | Security check bypassed | Handle all Results |
-| Unbounded `read_to_end` | OOM from malicious input | `take()` with size limit |
-| Check-then-act on files | TOCTOU race | Atomic operations |
+3. **Integer arithmetic**: Checked/saturating on untrusted values
+4. **TOCTOU**: No check-then-use races on shared resources
+5. **Secrets**: No hardcoded credentials, proper zeroization
+6. **Crypto**: Audited crates (`ring`, `rustcrypto`), proper RNG (`OsRng`)
+7. **Errors**: No sensitive data in error messages
+8. **Logging**: No secrets logged, PII redacted
+9. **Rate limits**: Endpoints protected against resource exhaustion
+10. **Dependencies**: `cargo audit` clean, `build.rs` reviewed
+11. **Capabilities**: Minimal authority, explicit not ambient
 
 ## Crates for Security
 
-- `secrecy` - Secret wrapper with zeroization
-- `subtle` - Constant-time operations
-- `zeroize` - Secure memory clearing
-- `ring` / `rustcrypto` - Audited cryptography
-- `validator` - Input validation derive macros
-- `argon2` / `bcrypt` - Password hashing
-- `governor` - Rate limiting
+- `secrecy` -- Secret wrapper with zeroization
+- `subtle` -- Constant-time operations
+- `zeroize` -- Secure memory clearing
+- `ring` / `rustcrypto` -- Audited cryptography
+- `validator` -- Input validation derive macros
+- `argon2` -- Password hashing
+- `governor` -- Rate limiting
+- `cargo-audit` -- Vulnerability database check
+- `cargo-vet` -- Supply chain verification
