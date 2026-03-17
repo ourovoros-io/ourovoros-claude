@@ -1,8 +1,84 @@
-# Rust Skills for Claude Code
+# Claude Code Configuration & Skills
 
-A collection of Rust-focused skills (plugins) for Claude Code that enhance AI-assisted Rust development with idiomatic patterns, security practices, and specialized workflows.
+A complete Claude Code setup: settings, hooks, permissions, statusline, slash commands, and a collection of Rust-focused skills for AI-assisted development.
 
-## Architecture: Hub and Spoke
+## What's Included
+
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Global development standards and instructions |
+| `settings.json` | Settings: hooks, permissions, plugins, statusline config |
+| `statusline.sh` | Custom statusline showing model, branch, context %, duration, cache hit rate |
+| `commands/` | Slash commands (`/fix-issue`, `/review-pr`) |
+| `skills/` | Rust development skills (hub-and-spoke + Rust for Rustaceans) |
+| `.claude/settings.local.json` | Project-local permissions and MCP servers |
+
+## Installation
+
+### Full setup (copy everything to `~/.claude/`)
+
+```bash
+# Settings and statusline
+cp settings.json ~/.claude/settings.json
+cp statusline.sh ~/.claude/statusline.sh
+chmod +x ~/.claude/statusline.sh
+
+# CLAUDE.md
+cp CLAUDE.md ~/.claude/CLAUDE.md
+
+# Slash commands
+cp -r commands/* ~/.claude/commands/
+
+# Skills
+cp -r skills/* ~/.claude/skills/
+```
+
+### Skills only
+
+```bash
+cp -r skills/* ~/.claude/skills/
+```
+
+Or symlink for easier updates:
+
+```bash
+ln -s $(pwd)/skills/* ~/.claude/skills/
+```
+
+## Settings Overview
+
+### Hooks
+
+- **PreToolUse (Bash)**: Blocks `rm -rf` (use `trash` instead) and direct pushes to main/master
+- **Notification**: Plays Glass sound on notifications
+- **Stop**: Plays Hero sound when Claude stops
+
+### Permissions (Deny List)
+
+Blocks access to sensitive paths: SSH keys, cloud credentials, keychains, wallet data, shell configs. Blocks destructive git operations (`--force`, `--hard`).
+
+### Plugins
+
+Includes rust-analyzer LSP, superpowers, code-review, Trail of Bits security skills, and Ars Contexta.
+
+### Statusline
+
+Format: `▸ model · folder › branch  ▰▰▱▱ ctx% · duration  ↻cache%`
+
+- Context bar changes color: cyan (<50%), amber (<80%), red (>=80%)
+- Shows session duration, cache hit rate, and git branch
+
+## Slash Commands
+
+### `/fix-issue $ISSUE_NUMBER`
+
+End-to-end workflow: reads GitHub issue, plans, implements, tests, creates PR, self-reviews, fixes findings, and comments on the issue.
+
+### `/review-pr $PR_NUMBER`
+
+Reviews a PR with parallel agents, fixes P1-P3 findings, verifies the quality pipeline, and posts a summary.
+
+## Skills Architecture: Hub and Spoke
 
 This collection uses a **hub-and-spoke model** for efficient context usage:
 
@@ -49,20 +125,6 @@ rfr-* (Rust for Rustaceans)     ← Deep-dive reference skills
 - **Efficient**: Only loads what you need
 - **Deep**: Full reference available when required
 - **Maintainable**: Each skill focuses on one area
-
-## Installation
-
-Copy the skills to your Claude Code skills directory:
-
-```bash
-cp -r skills/* ~/.claude/skills/
-```
-
-Or symlink for easier updates:
-
-```bash
-ln -s $(pwd)/skills/* ~/.claude/skills/
-```
 
 ## Skills Overview
 
